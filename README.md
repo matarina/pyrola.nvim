@@ -1,4 +1,4 @@
-+g# nvim_ds_repl
+# nvim_ds_repl
 
 `nvim_ds_repl` is a Neovim plugin designed to assist data scientists in executing Python and R code line by line. It utilizes sockets and multi-threading to interact with live Python/R server processes, providing a seamless real-time Read-Eval-Print Loop (REPL) experience.
 
