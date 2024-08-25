@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/bc9cd21a-9eba-49d2-855f-59954435e2ed
 
 
 ## Installation
-#### Prerequisites
+Prerequisites
     nvim-treesitter: Required for semantic code identification.
     IPython: Used for the Python REPL terminal.
     Radian: Used for the R REPL terminal.
