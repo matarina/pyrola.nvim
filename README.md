@@ -25,6 +25,7 @@ return {
         -- Configuration goes here
     end,
 }
+```
 
 
 
@@ -33,7 +34,7 @@ Additionally, you need to install the following Python and R tools:
 ```bash
 pip install --user ipython
 pip install --user radian
-
+```
 
 Key Bindings
 
@@ -66,7 +67,7 @@ vim.api.nvim_create_autocmd({"BufEnter", "BufWinEnter"}, {
         end, {noremap = true})
     end
 })
-
+```
 
 
 
