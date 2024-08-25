@@ -7,11 +7,11 @@
 - **Real-time REPL**: Execute code in real-time within Neovim.
 - **Semantic Code Block Selection**: Select and send specific code blocks for evaluation.
 - **Environment Variable Inspector**: Debug by inspecting environment variables.
-- **Ligh
+- **Lightweight and Low-level**: Efficiently designed to integrate seamlessly into your workflow.
 
 https://github.com/user-attachments/assets/bc9cd21a-9eba-49d2-855f-59954435e2ed
 
-tweight and Low-level**: Efficiently designed to integrate seamlessly into your workflow.
+
 
 ## Installation
 #### Prerequisites
