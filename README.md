@@ -15,9 +15,9 @@ https://github.com/user-attachments/assets/bc9cd21a-9eba-49d2-855f-59954435e2ed
 
 ## Installation
 ### Prerequisites
-    nvim-treesitter: Required for semantic code identification.
-    IPython: Used for the Python REPL terminal.
-    Radian: Used for the R REPL terminal.
+nvim-treesitter: Required for semantic code identification.
+IPython: Used for the Python REPL terminal.
+Radian: Used for the R REPL terminal.
 
 You can install `nvim_ds_repl` using your preferred plugin manager. Here's an example with `lazy.nvim`:
 
@@ -38,6 +38,10 @@ Additionally, you need to install the following Python and R tools:
 ```bash
 pip install --user ipython
 pip install --user radian
+```
+
+```R
+install.packages("httpuv")
 ```
 
 Key Bindings
