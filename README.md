@@ -44,7 +44,7 @@ pip install --user radian
 install.packages("httpuv")
 ```
 
-Key Bindings
+### Key Bindings
 
 Below are the recommended key bindings to use with nvim_ds_repl:
 

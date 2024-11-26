@@ -148,6 +148,10 @@ end
 local function get_visual_selection()
     local start_pos, end_pos = vim.fn.getpos("v"), vim.fn.getcurpos()
     local start_line, end_line, start_col, end_col = start_pos[2], end_pos[2], start_pos[3], end_pos[3]
+    if start_line > end_line then
+        start_line, end_line = end_line, start_line
+        start_col, end_col = end_col, start_col
+    end
     local lines = vim.api.nvim_buf_get_lines(0, start_line - 1, end_line, false)
 
     lines[1] = string.sub(lines[1], start_col, -1)
@@ -183,6 +187,16 @@ function M.inspect()
     end
 end
 
+
+function M.table_view()
+    node = vim.treesitter.get_node()
+    obj  = ts.get_node_text(node, 0)
+    if vim.bo.filetype == "r" then
+        r_query.table_view(obj, M.port)
+    else
+        python_query.inspect(obj, M.port)
+    end
+end
 
 return M
 

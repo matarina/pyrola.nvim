@@ -12,62 +12,79 @@ import sys
 
 ipython = get_ipython()
 httpd = None  # Global reference to the server
+# def table_view():
+#     response = {}
+
 
 def query_object_info(obj):
     """
-    Query detailed information about a Python object and return it as a formatted string.
+    Query detailed information about a Python object and return it as a JSON string.
 
     Parameters:
     - obj: The object to inspect.
 
     Returns:
-    - info_str: A formatted string containing the object's type, class, string representation,
-                length, docstring, and, if callable, the function signature and init docstring.
+    - json_str: A JSON string containing the type and data of the object.
     """
-    info_lines = []
-
-    # Object Type and Class
-    info_lines.append(f"Type: {type(obj).__name__}")
-    info_lines.append(f"Class: {obj.__class__.__name__ if hasattr(obj, '__class__') else 'N/A'}")
-
-    # String Representation
-    try:
-        info_lines.append(f"String : {str(obj)}")
-    except Exception as e:
-        info_lines.append(f"String : Error - {e}")
-
-    # Length (for collections)
-    if hasattr(obj, '__len__'):
-        try:
-            info_lines.append(f"Length: {len(obj)}")
-        except Exception as e:
-            info_lines.append(f"Length: Error in calculating length - {e}")
+    response = {}
+    
+    if isinstance(obj, pd.DataFrame):
+        # Convert DataFrame to JSON with 'records' orientation
+        response['type'] = 'dataframe'
+        response['data'] = obj.to_json(orient='records')
     else:
-        info_lines.append(f"Length: N/A")
+        # Gather object information as a string
+        info_lines = []
 
-    # Docstrings
-    docstring = inspect.getdoc(obj) or "<No docstring available>"
-    info_lines.append(f"Docstring: {docstring}")
+        # Object Type and Class
+        info_lines.append(f"Type: {type(obj).__name__}")
+        info_lines.append(f"Class: {obj.__class__.__name__ if hasattr(obj, '__class__') else 'N/A'}")
 
-    # Callable Signature and Docstring
-    if callable(obj):
+        # String Representation
         try:
-            signature = inspect.signature(obj)
-            info_lines.append(f"Signature: {obj}{signature}")
-        except ValueError as e:
-            info_lines.append(f"Signature: Could not retrieve signature - {e}")
-        
-        # If the object has an __init__ method, get its docstring as well
-        if inspect.isclass(obj):
-            init_doc = inspect.getdoc(obj.__init__) or "<No __init__ docstring available>"
-            info_lines.append(f"Init Docstring: {init_doc}")
+            info_lines.append(f"String : {str(obj)}")
+        except Exception as e:
+            info_lines.append(f"String : Error - {e}")
+
+        # Length (for collections)
+        if hasattr(obj, '__len__'):
+            try:
+                info_lines.append(f"Length: {len(obj)}")
+            except Exception as e:
+                info_lines.append(f"Length: Error in calculating length - {e}")
         else:
-            info_lines.append(f"Init Docstring: N/A")
+            info_lines.append(f"Length: N/A")
 
-    # Join all lines into a single formatted string
-    info_str = "\n".join(info_lines)
+        # Docstrings
+        docstring = inspect.getdoc(obj) or "<No docstring available>"
+        info_lines.append(f"Docstring: {docstring}")
 
-    return info_str
+        # Callable Signature and Docstring
+        if callable(obj):
+            try:
+                signature = inspect.signature(obj)
+                info_lines.append(f"Signature: {obj}{signature}")
+            except ValueError as e:
+                info_lines.append(f"Signature: Could not retrieve signature - {e}")
+            
+            # If the object has an __init__ method, get its docstring as well
+            if inspect.isclass(obj):
+                init_doc = inspect.getdoc(obj.__init__) or "<No __init__ docstring available>"
+                info_lines.append(f"Init Docstring: {init_doc}")
+            else:
+                info_lines.append(f"Init Docstring: N/A")
+
+        # Join all lines into a single string
+        info_str = "\n".join(info_lines)
+
+        response['type'] = 'info'
+        response['data'] = info_str
+
+    # Convert the response dictionary to a JSON string
+    json_str = json.dumps(response)
+    return json_str
+
+
 
 # Define the HTTP request handler
 class GlobalEnvHandler(BaseHTTPRequestHandler):
