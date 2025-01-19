@@ -23,12 +23,43 @@ You can install `nvim_ds_repl` using your preferred plugin manager. Here's an ex
 
 ```lua
 return {
-    "petrichorma/nvim_ds_repl",
-    dependencies = {"nvim-treesitter/nvim-treesitter"},
-    config = function()
-        -- Configuration goes here
-    end,
-}
+     "matarina/pyrola.nvim",
+      dependencies = { "nvim-treesitter/nvim-treesitter" },
+      build = ":UpdateRemotePlugins",
+      config = function(_, opts)
+        -- Load pyrola first
+        local pyrola = require("pyrola")
+        pyrola.setup({
+                kernel_map = {
+                    python = "python3",
+                    r = "ir",
+                    cpp = "xcpp14"
+                },
+                split_horizen = false,
+                split_ratio = 0.3
+            })
+
+        -- Set keymapping
+        vim.keymap.set("n", "<Enter>", function()
+          pyrola.send_statement_definition()
+        end, {noremap = true})
+
+        vim.keymap.set("n", "<leader>is", function()
+          pyrola.inspect()
+        end, {noremap = true})
+        -- Treesitter config
+        require("nvim-treesitter.configs").setup({
+          ensure_installed = { "cpp", "r", "python" },
+          auto_install = true,
+    playground = {
+        enable = true,
+    },
+          highlight = {
+            enable = true,
+          },
+        })
+      end,
+    },
 ```
 
 
