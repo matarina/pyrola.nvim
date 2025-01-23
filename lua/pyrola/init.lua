@@ -91,69 +91,6 @@ local function open_terminal()
     end
 end
 
---
--- local function open_terminal()
---     M.filetype = vim.bo.filetype
---     local bufid = vim.api.nvim_create_buf(false, true)
---
---     if M.config.split_horizen then
---         local height = math.floor(vim.o.lines * M.config.split_ratio)
---         split_cmd = "botright " .. height .. "split"
---     else
---         local width = math.floor(vim.o.columns * M.config.split_ratio)
---         split_cmd = "botright " .. width .. "vsplit"
---     end
---     vim.cmd(split_cmd)
---
---     vim.api.nvim_win_set_buf(0, bufid)
---
---     local term_buf = vim.api.nvim_get_current_buf()
---
---
---     local winid = vim.api.nvim_get_current_win()
---
---     -- Map kernel name based on filetype
---     local kernelname = M.config.kernel_map[M.filetype]
---     M.connection_file_path = vim.fn.InitKernel(kernelname)
---
---     local function get_plugin_path()
---         local runtime_paths = vim.api.nvim_list_runtime_paths()
---         for _, path in ipairs(runtime_paths) do
---             if path:match("pyrola.nvim$") then
---                 return path
---             end
---         end
---     end
---
---     console_path = get_plugin_path()
---
---     if M.connection_file_path then
---         local term_cmd = string.format("python " .. console_path .. "/rplugin/python3/console.py --existing %s", M.connection_file_path, "--filetype ", M.filetype)
---         local chanid = vim.fn.termopen(term_cmd, {
---             on_exit = function()
---             end,
---         })
---
---
---
---         M.term = {
---             opened = 1,
---             winid = winid,
---             bufid = bufid,
---             chanid = chanid
---         }
---
---         vim.api.nvim_create_autocmd("VimLeavePre", {
---             callback = function()
---                 vim.fn.ShutdownKernel(M.filetype, M.connection_file_path)
---                 os.remove(M.connection_file_path)
---             end,
---             once = true
---         })
---     else
---         vim.api.nvim_err_writeln("Failed to initialize kernel")
---     end
--- end
 
 local function send_message(message)
     if M.term.opened == 0 then
