@@ -1,32 +1,32 @@
 # Pyrola
 
-`pyrola` is designed to provide a multi-language supported REPL experience in Neovim. It allows you to program interactively, quickly inspect variables in real-time, and view images of output.
+`pyrola` is meticulously crafted to deliver a multi-language supported REPL (Read-Eval-Print Loop) experience within the Neovim environment. This innovative tool empowers users to engage in interactive programming, enabling them to swiftly inspect variables in real-time and visualize output images seamlessly.
 
 ## Features
 
-- **Real-time REPL**: Execute code in real-time within Neovim.
-- **Semantic Code Block Selection**: Select and send specific code blocks for evaluation.
-- **Environment Variable Inspector**: Debug by inspecting environment variables.
-- **Rough Image Viewer**: Preview output of images with a rough resolution.
-- **Lightweight and Low-level**: Efficiently designed to integrate seamlessly into your workflow.
+- **Real-time REPL**: Execute code dynamically within Neovim, allowing for immediate feedback and interaction.
+- **Semantic Code Block Selection**: Effortlessly select and dispatch specific code blocks for evaluation, enhancing the coding workflow.
+- **Environment Variable Inspector**: Facilitate debugging by inspecting environment variables directly within the REPL.
+- **Rough Image Viewer**: Preview image outputs with a rough resolution, providing a quick visual reference without the need for external viewers.
+- **Lightweight and Low-level**: Designed with efficiency in mind, `pyrola` integrates seamlessly into your existing workflow without unnecessary overhead.
 
 ## Installation
 
 ### Prerequisites
 
-To use `pyrola`, you need to install the following Python packages:
+To harness the full potential of `pyrola`, you must first install the following essential Python packages:
 
 ```bash
 pip install pynvim jupyter-client prompt-toolkit
 ```
 
-Additionally, you will need to install [timg](https://github.com/hzeller/timg), a textual terminal image viewer. For example, on Debian-based systems, you can install it using:
+In addition, you will need to install [timg](https://github.com/hzeller/timg), a terminal-based image viewer. For users on Debian-based systems, the installation can be accomplished with the following command:
 
 ```bash
 apt install timg
 ```
 
-Then, install `pyrola` using `lazy.nvim` as follows:
+Subsequently, you can install `pyrola` using `lazy.nvim` by incorporating the following configuration into your Neovim setup:
 
 ```lua
 return {
@@ -41,11 +41,11 @@ return {
                 r = "ir",
                 cpp = "xcpp14"
             },
-            split_horizen = false, -- Split terminal direction
-            split_ratio = 0.3 -- Split terminal size
+            split_horizen = false, -- Define the terminal split direction
+            split_ratio = 0.3 -- Set the terminal split size
         })
 
-        -- Set key mappings
+        -- Define key mappings for enhanced functionality
         vim.keymap.set("n", "<Enter>", function()
             pyrola.send_statement_definition()
         end, { noremap = true })
@@ -58,9 +58,9 @@ return {
             pyrola.inspect()
         end, { noremap = true })
 
-        -- Treesitter configuration
+        -- Configure Treesitter for enhanced code parsing
         require("nvim-treesitter.configs").setup({
-            ensure_installed = { "cpp", "r", "python" }, -- Ensure installed Treesitter language parsers
+            ensure_installed = { "cpp", "r", "python" }, -- Ensure the necessary Treesitter language parsers are installed
             auto_install = true
         })
     end,
@@ -69,15 +69,15 @@ return {
 
 ## Usage
 
-`pyrola` is developed based on communication between the Jupyter kernel and client. Any language listed with a Jupyter kernel can theoretically be supported. For example, to run a Python REPL environment with `pyrola`, you need to install the Python Jupyter kernel, e.g., `ipykernel`. For your specific language and kernel, you should explicitly specify it in the `kernel_map` options, e.g., `{ kernel_map = { python = "python3" } }`. The index corresponds to your filetype, which can be checked with the command: `echo &filetype`. The values are your kernel names.
+`pyrola` operates on the principle of communication between the Jupyter kernel and the client, allowing for a versatile programming experience across various languages. To initiate a Python REPL environment with `pyrola`, you must install the Python Jupyter kernel, such as `ipykernel`. For your specific programming language and kernel, it is crucial to explicitly define it in the `kernel_map` options, for instance, `{ kernel_map = { python = "python3" } }`. The index corresponds to your filetype, which can be verified using the command: `echo &filetype`. The values represent your kernel names.
 
-You can also configure the split terminal direction and size using the options `split_horizen` and `split_ratio`. For semantic code parsing and sending to the terminal, the Treesitter language parser is necessary. You need to install the parser in your Treesitter Lua configuration if you do not want to specify it explicitly in the `pyrola` Lua config.
+You can also customize the terminal split direction and size through the options `split_horizen` and `split_ratio`. For semantic code parsing and dispatching to the terminal, the Treesitter language parser is essential. Ensure that the parser is installed in your Treesitter Lua configuration if you prefer not to specify it explicitly in the `pyrola` Lua configuration.
 
-For sending large code blocks, visual selection is available, allowing you to bind keys to send code selected in visual mode to the terminal. To inspect variables, bind keys to `pyrola.inspect()`, and trigger it when the cursor is on the variables you want to inspect. This feature currently supports Python and R, with plans to add more languages in the future. Contributions to add variable inspectors for your preferred languages are welcome!
+For sending larger code blocks, visual selection is available, allowing you to bind keys to transmit code selected in visual mode to the terminal. To inspect variables, you can bind keys to `pyrola.inspect()`, triggering it when the cursor hovers over the variables you wish to examine. This feature currently supports Python and R, with aspirations to expand support for additional languages in the future. Contributions to enhance variable inspection for your preferred languages are warmly welcomed!
 
 ### Key Bindings
 
-Below are the recommended key bindings to use with `pyrola`:
+Below are the recommended key bindings to optimize your experience with `pyrola`:
 
 ```lua
 -- nvim_ds_repl plugin configuration --
@@ -105,10 +105,9 @@ vim.api.nvim_create_autocmd({"BufEnter", "BufWinEnter"}, {
 ## Credit
 
 - [Jupyter Team](https://github.com/jupyter/jupyter)
-- [nvim-python-repl](https://github.com/geg2102/nvim-python-repl): `pyrola` is inspired by `nvim-python-repl` from the very beginning.
+- [nvim-python-repl](https://github.com/geg2102/nvim-python-repl): `pyrola` draws inspiration from the foundational work of `nvim-python-repl`.
 
 ## Contributing
 
-Contributions are welcome! `pyrola` is newly born and highly actively maintained. Any issues will receive a real-time response. For higher quality image rendering, terminal graphic protocols like Kitty or Sixel are not currently supported in the Neovim terminal buffer, as discussed in [this issue](https://github.com/neovim/neovim/issues/30889). Keep an eye on any progress in the future!
-
+Contributions are not only welcome but encouraged! `pyrola` is in its nascent stages and is actively maintained. Any reported issues will receive prompt attention. For enhanced image rendering capabilities, terminal graphic protocols such as Kitty or Sixel are not yet supported within the Neovim terminal buffer, as discussed in [this issue](https://github.com/neovim/neovim/issues/30889). Stay tuned for future developments and improvements!
 
