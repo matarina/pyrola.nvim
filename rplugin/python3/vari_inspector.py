@@ -1,5 +1,5 @@
 def get_python_inspector(input_var):
-    python_inspector = '''
+    python_inspector = """
 import sys
 import inspect
 import types
@@ -236,12 +236,12 @@ python_Var_inspector = UniversalInspector()
 var_output = python_Var_inspector.inspect(<<<VAR>>>)
 b = "asdfasdfasdf"
 print(var_output)
-'''
-    return python_inspector.replace('<<<VAR>>>', str(input_var))
+"""
+    return python_inspector.replace("<<<VAR>>>", str(input_var))
 
 
 def get_r_inspector(input_var):
-    r_inspector = '''
+    r_inspector = """
 format_line <- function(attr_name, value) {
   sprintf("%-15s║ %s", attr_name, as.character(value))
 }
@@ -371,11 +371,8 @@ inspect <- function(obj) {
   }
 }
 cat(inspect(<<<VAR>>>))
-'''
-    return r_inspector.replace('<<<VAR>>>', str(input_var))
-
-
-
+"""
+    return r_inspector.replace("<<<VAR>>>", str(input_var))
 
 
 

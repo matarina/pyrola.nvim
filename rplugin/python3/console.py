@@ -1,11 +1,18 @@
-import sys
+import pynvim
+import re
+import queue
+from threading import Thread
 import os
+from pathlib import Path
+from PIL import Image
+import io
+import base64
+import sys
 from prompt_toolkit.output import ColorDepth
 import signal
 import json
 import time
 import asyncio
-from image_viewer import write_chunked
 from prompt_toolkit.formatted_text import HTML
 from typing import Optional, List
 from jupyter_client import BlockingKernelClient
@@ -23,9 +30,8 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import to_filter
 from prompt_toolkit.lexers import PygmentsLexer
 from pygments.lexers import Python3Lexer, CppLexer, TextLexer
-from pygments.lexers.r import SLexer  
+from pygments.lexers.r import SLexer
 from pygments.token import Token
-import re
 
 
 class ReplInterpreter:
@@ -53,31 +59,42 @@ class ReplInterpreter:
         else:
             self.lexer = PygmentsLexer(TextLexer)
 
+        self.nvim = None
+        self.nvim_queue = queue.Queue()
+        self.nvim_thread = None
 
-        self.style = Style.from_dict({
-            # Basic colors
-            "continuation": "#ff8c00",
+        try:
+            self.nvim = pynvim.attach(
+                "socket", path=os.environ.get("NVIM_LISTEN_ADDRESS")
+            )
+            # Start Neovim communication thread
+            self.nvim_thread = Thread(target=self._nvim_worker, daemon=True)
+            self.nvim_thread.start()
+        except Exception as e:
+            print(f"Failed to connect to Neovim: {e}", file=sys.stderr)
 
-            # Use RGB colors for better compatibility
-            "pygments.keyword":         "#569cd6",
-            "pygments.string":         "#ce9178",
-            "pygments.number":         "#b5cea8",
-            "pygments.comment":        "#6a9955",
-            "pygments.operator":       "#d4d4d4",
-            "pygments.name.function":  "#1f86d6",
-            "pygments.name.class":     "#4ec9b0",
-            "pygments.text":          "#d4d4d4",
-            "pygments.name":          "#f5614a",
-            "pygments.name.builtin":  "#569cd6",
-            "pygments.punctuation":   "#d4d4d4",
-            "pygments.name.namespace": "#4ec9b0",
-            "pygments.name.decorator": "#c586c0",
-            "pygments.name.exception": "#f44747",
-            "pygments.name.constant":  "#4fc1ff",
-        })
-
-
-
+        self.style = Style.from_dict(
+            {
+                # Basic colors
+                "continuation": "#ff8c00",
+                # Use RGB colors for better compatibility
+                "pygments.keyword": "#569cd6",
+                "pygments.string": "#ce9178",
+                "pygments.number": "#b5cea8",
+                "pygments.comment": "#6a9955",
+                "pygments.operator": "#d4d4d4",
+                "pygments.name.function": "#1f86d6",
+                "pygments.name.class": "#4ec9b0",
+                "pygments.text": "#d4d4d4",
+                "pygments.name": "#f5614a",
+                "pygments.name.builtin": "#569cd6",
+                "pygments.punctuation": "#d4d4d4",
+                "pygments.name.namespace": "#4ec9b0",
+                "pygments.name.decorator": "#c586c0",
+                "pygments.name.exception": "#f44747",
+                "pygments.name.constant": "#4fc1ff",
+            }
+        )
 
         def continuation_prompt(width, line_number, is_soft_wrap):
             return HTML("<orange>.. </orange>")
@@ -111,9 +128,6 @@ class ReplInterpreter:
         else:
             print("No kernel connection file specified", file=sys.stderr)
             sys.exit(1)
-
-
-
 
     def _create_keybindings(self):
         kb = KeyBindings()
@@ -161,7 +175,7 @@ class ReplInterpreter:
     async def interact_async(self, banner: Optional[str] = None):
         print_formatted_text(
             HTML(
-                "<orange>Welcome to Pyrola! kernel</orange> <ansired>{}</ansired> <orange>initialized!</orange>".format(
+                "<orange>\n    Welcome to Pyrola! kernel</orange> <ansired>{}</ansired> <orange>initialized!\n</orange>".format(
                     self.kernelname
                 )
             ),
@@ -314,10 +328,80 @@ class ReplInterpreter:
                 print("\n")
                 return
 
-
     def interact(self, banner: Optional[str] = None):
         asyncio.run(self.interact_async(banner))
 
+    def _nvim_worker(self):
+        """Worker thread for handling Neovim communications"""
+        while True:
+            try:
+                data = self.nvim_queue.get()
+                if data is None:  # Exit signal
+                    break
+                try:
+                    dimensions = {
+                        "width": self.nvim.lua.vim.api.nvim_get_option("columns"),
+                        "height": self.nvim.lua.vim.api.nvim_get_option("lines"),
+                    }
+
+                    target_width = dimensions["width"] * 10 // 2
+                    target_height = dimensions["height"] * 20 // 2
+
+                    # Decode base64 image
+                    img_bytes = base64.b64decode(data)
+                    img = Image.open(io.BytesIO(img_bytes))
+
+                    orig_width, orig_height = img.size
+
+                    if (
+                        orig_width > target_width
+                        or orig_height > target_height
+                        or orig_width < target_width / 2
+                        or orig_height < target_height / 2
+                    ):
+
+                        # Calculate scaling ratio while maintaining aspect ratio
+                        width_ratio = target_width / orig_width
+                        height_ratio = target_height / orig_height
+                        ratio = min(width_ratio, height_ratio)
+
+                        # Calculate new dimensions
+                        new_width = int(orig_width * ratio)
+                        new_height = int(orig_height * ratio)
+
+                        # Resize image
+                        img = img.resize(
+                            (new_width, new_height), Image.Resampling.LANCZOS
+                        )
+
+                        # Convert back to base64
+                        buffer = io.BytesIO()
+                        img.save(buffer, format="PNG")
+                        img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+                    else:
+                        new_width = orig_width
+                        new_height = orig_height
+                        img_base64 = data
+
+                    self.nvim.command('let g:pyrola_image_data = "%s"' % img_base64)
+                    self.nvim.command('let g:pyrola_image_width = "%s"' % new_width)
+                    self.nvim.command('let g:pyrola_image_height= "%s"' % new_height)
+                    self.nvim.command(
+                        'lua require("pyrola.image").show_image(vim.g.pyrola_image_data, vim.g.pyrola_image_width, vim.g.pyrola_image_height)'
+                    )
+                    self.nvim.command("unlet g:pyrola_image_data")
+                except Exception as e:
+                    print(f"Error in Neovim thread: {e}", file=sys.stderr)
+            except Exception as e:
+                print(f"Error in Neovim worker: {e}", file=sys.stderr)
+            finally:
+                self.nvim_queue.task_done()
+
+    def _cleanup(self):
+        """Cleanup resources"""
+        if self.nvim_thread and self.nvim_thread.is_alive():
+            self.nvim_queue.put(None)  # Send exit signal
+            self.nvim_thread.join(timeout=1.0)
 
     async def handle_iopub_msgs(self, msg_id):
         _imagemime = {
@@ -357,42 +441,50 @@ class ReplInterpreter:
 
                 content = msg["content"]
                 data = content.get("data", {})
-                    
-                    # Handle text output first
-                if "text/plain" in data:
+
+                if "text/plain" in data and not any(
+                    mime in data for mime in _imagemime
+                ):
                     print(data["text/plain"])
                     sys.stdout.flush()
 
-                    # Then handle image data
-                    for mime in _imagemime:
-                        if mime in data:
-                            import base64
-                            import tempfile
-                            import subprocess
-                            import os
+                # Handle image data
+                for mime in _imagemime:
+                    if mime in data:
+                        import tempfile
+                        import subprocess
+
+                        try:
+                            ext = _imagemime[mime]
+                            with tempfile.NamedTemporaryFile(
+                                suffix=f".{ext}", delete=False
+                            ) as tmp:
+                                if mime == "image/svg+xml":
+                                    tmp.write(data[mime].encode("utf-8"))
+                                else:
+                                    img_bytes = base64.b64decode(data[mime])
+                                    tmp.write(img_bytes)
+                                tmp_path = tmp.name
 
                             try:
-                                ext = _imagemime[mime]
-                                with tempfile.NamedTemporaryFile(
-                                    suffix=f".{ext}", delete=False
-                                ) as tmp:
-                                    if mime == "image/svg+xml":
-                                        tmp.write(data[mime].encode("utf-8"))
-                                    else:
-                                        img_bytes = base64.b64decode(data[mime])
-                                        tmp.write(img_bytes)
-                                    tmp_path = tmp.name
+                                subprocess.run(
+                                    ["timg", "-p", "q", tmp_path], check=True
+                                )
+                                if (
+                                    self.nvim
+                                    and self.nvim_thread
+                                    and self.nvim_thread.is_alive()
+                                ):
+                                    self.nvim_queue.put(data[mime])
+                            except (
+                                subprocess.CalledProcessError,
+                                FileNotFoundError,
+                            ) as e:
+                                print(f"Failed to display image: {e}")
 
-                                try:
-                                    subprocess.run(["timg", "-p", "q", tmp_path], check=True)
-                                except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                                    print(f"Failed to display image: {e}")
-
-                                os.unlink(tmp_path)
-                            except Exception as e:
-                                print(f"Error handling image: {e}")
-                            break
-
+                            os.unlink(tmp_path)
+                        except Exception as e:
+                            print(f"Error handling image: {e}")
 
             elif msg_type == "error":
                 content = msg["content"]
@@ -407,30 +499,23 @@ class ReplInterpreter:
                     sys.stdout.write("\r")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 def main():
     parser = argparse.ArgumentParser(description="Jupyter Console")
-    parser.add_argument( "--existing", type=str, help="an existing kernel full path.")
-    parser.add_argument( "--filetype", type=str, help="language name based filetype.")
+    parser.add_argument("--existing", type=str, help="an existing kernel full path.")
+    parser.add_argument("--filetype", type=str, help="language name based filetype.")
+    parser.add_argument("--nvim-socket", type=str, help="Neovim socket address")
     args = parser.parse_args()
 
-    interpreter = ReplInterpreter(connection_file=args.existing, lan = args.filetype)
+    # Set NVIM_LISTEN_ADDRESS environment variable
+    if args.nvim_socket:
+        os.environ["NVIM_LISTEN_ADDRESS"] = args.nvim_socket
+
+    interpreter = ReplInterpreter(connection_file=args.existing, lan=args.filetype)
     interpreter.interact()
 
 
 if __name__ == "__main__":
     main()
+
 
 

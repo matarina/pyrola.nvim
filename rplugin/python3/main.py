@@ -2,7 +2,7 @@ import socket
 import json
 import time
 import pynvim
-from vari_inspector import get_python_inspector, get_r_inspector 
+from vari_inspector import get_python_inspector, get_r_inspector
 from jupyter_client import KernelManager, BlockingKernelClient
 
 @pynvim.plugin
@@ -145,6 +145,9 @@ class PyrolaPlugin(object):
             if self.client:
                 self.client.stop_channels()
                 self.client = None
+
+
+
 
 
 
