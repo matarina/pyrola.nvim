@@ -1,4 +1,4 @@
-![vlcsnap-2025-01-30-06h11m40s788](https://github.com/user-attachments/assets/d48c9889-53e7-46d0-9f2b-4ea9c4715c47)# Pyrola
+# Pyrola
 
 `pyrola` is meticulously crafted to deliver a multi-language supported REPL (Read-Eval-Print Loop) experience within the Neovim environment. This innovative tool empowers users to engage in interactive programming, enabling them to swiftly inspect variables in real-time and visualize output images seamlessly.
 ## DEMO
