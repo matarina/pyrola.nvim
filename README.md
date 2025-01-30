@@ -1,3 +1,4 @@
+![Cool Text - Pyrola 475027950360735](https://github.com/user-attachments/assets/4d55bf4a-2a8c-402e-8c38-8038638e7bc4)
 # Pyrola
 
 `pyrola` is meticulously crafted to deliver a multi-language supported REPL (Read-Eval-Print Loop) experience within the Neovim environment. This innovative tool empowers users to engage in interactive programming, enabling them to swiftly inspect variables in real-time and visualize output images seamlessly.
