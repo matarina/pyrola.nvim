@@ -7,7 +7,7 @@
 - **Real-time REPL**: Execute code dynamically within Neovim, allowing for immediate feedback and interaction.
 - **Semantic Code Block Selection**: Effortlessly select and dispatch specific code blocks for evaluation, enhancing the coding workflow.
 - **Environment Variable Inspector**: Facilitate debugging by inspecting environment variables directly within the REPL.
-- **Rough Image Viewer**: Preview image outputs with a rough resolution, providing a quick visual reference without the need for external viewers.
+- **Image Viewer**: Preview image outputs with a high or rough resolution, providing a quick visual reference without the need for external viewers.
 - **Lightweight and Low-level**: Designed with efficiency in mind, `pyrola` integrates seamlessly into your existing workflow without unnecessary overhead.
 
 ## Installation
@@ -19,7 +19,7 @@ To harness the full potential of `pyrola`, you must first install the following 
 ```bash
 pip install pynvim jupyter-client prompt-toolkit
 ```
-
+For image viewer, high quality image preview are based kitty graphic protocol,a  rough pixelized resolution image in console can be available for all terminal.
 In addition, you will need to install [timg](https://github.com/hzeller/timg), a terminal-based image viewer. For users on Debian-based systems, the installation can be accomplished with the following command:
 
 ```bash
