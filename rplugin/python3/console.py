@@ -445,12 +445,22 @@ class ReplInterpreter:
                 if "text/plain" in data and not any(
                     mime in data for mime in _imagemime
                 ):
-                    print(data["text/plain"])
+                    text = data.get("text/plain", "")
+                    if isinstance(text, str):
+                        content = text
+                    else:
+                        content = str(text[0]) if text else ''
+                    print(content)
                     sys.stdout.flush()
 
                 # Handle image data
                 for mime in _imagemime:
                     if mime in data:
+                        if isinstance(data[mime], str):
+                            image_data = data[mime]
+                        else:
+                            image_data = str(data[mime][0]) if data[mime] else ''
+
                         import tempfile
                         import subprocess
 
@@ -460,9 +470,9 @@ class ReplInterpreter:
                                 suffix=f".{ext}", delete=False
                             ) as tmp:
                                 if mime == "image/svg+xml":
-                                    tmp.write(data[mime].encode("utf-8"))
+                                    tmp.write(image_data.encode("utf-8"))
                                 else:
-                                    img_bytes = base64.b64decode(data[mime])
+                                    img_bytes = base64.b64decode(image_data)
                                     tmp.write(img_bytes)
                                 tmp_path = tmp.name
 
@@ -475,7 +485,7 @@ class ReplInterpreter:
                                     and self.nvim_thread
                                     and self.nvim_thread.is_alive()
                                 ):
-                                    self.nvim_queue.put(data[mime])
+                                    self.nvim_queue.put(image_data)
                             except (
                                 subprocess.CalledProcessError,
                                 FileNotFoundError,
@@ -485,6 +495,7 @@ class ReplInterpreter:
                             os.unlink(tmp_path)
                         except Exception as e:
                             print(f"Error handling image: {e}")
+
 
             elif msg_type == "error":
                 content = msg["content"]

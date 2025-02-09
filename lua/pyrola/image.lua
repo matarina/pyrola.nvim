@@ -6,6 +6,15 @@ if not stdout then
     error("failed to open stdout")
 end
 
+-- Enable tmux passthrough if needed
+local function enable_tmux_passthrough()
+    if os.getenv("TMUX") then
+        local enable_seq = '\027Ptmux;\027\027]52;c;1\007\027\\'
+        stdout:write(enable_seq)
+    end
+end
+enable_tmux_passthrough()
+
 -- Helper function to chunk large data
 local function get_chunked(str)
     local chunks = {}
@@ -24,6 +33,14 @@ local function write(data)
         return
     end
     stdout:write(data)
+end
+
+local function tmux_wrap(cmd)
+    if os.getenv("TMUX") then
+        cmd = cmd:gsub('\027', '\027\027')
+        return '\027Ptmux;' .. cmd .. '\027\\'
+    end
+    return cmd
 end
 
 local function pixels_to_cells(pixels, is_width)
@@ -82,19 +99,15 @@ end
 
 -- Calculate center position
 local function get_center_position(width, height)
-    -- Get terminal dimensions in cells
     local term_width = vim.api.nvim_get_option("columns")
     local term_height = vim.api.nvim_get_option("lines")
 
-    -- Convert image dimensions from pixels to terminal cells
     local width_cells = pixels_to_cells(width, true)
     local height_cells = pixels_to_cells(height, false)
 
-    -- Calculate center coordinates in cells
     local x = math.floor((term_width - width_cells) / 2)
     local y = math.floor((term_height - height_cells) / 2)
 
-    -- Ensure coordinates are positive
     return math.max(x, 0), math.max(y, 0)
 end
 
@@ -113,7 +126,8 @@ local function clear_image(image_id)
     end
     control_str = control_str:sub(1, -2)
 
-    write(string.format("\x1b_G%s\x1b\\", control_str))
+    local cmd = string.format("\x1b_G%s\x1b\\", control_str)
+    write(tmux_wrap(cmd))
 end
 
 local function setup_cursor_autocmd()
@@ -123,16 +137,11 @@ local function setup_cursor_autocmd()
         {
             group = group,
             callback = function()
-                -- Clear the image
                 clear_image(1)
-
-                -- Close the float window if it exists
                 if M.current_winid and vim.api.nvim_win_is_valid(M.current_winid) then
                     vim.api.nvim_win_close(M.current_winid, true)
                     M.current_winid = nil
                 end
-
-                -- Remove the autocmd after clearing
                 vim.api.nvim_del_augroup_by_name("ImageClear")
             end,
             once = true
@@ -149,16 +158,13 @@ function M.show_image(base64_data, width, height)
     width = tonumber(width or 300)
     height = tonumber(height or 300)
 
-    -- Create float window first
     if M.current_winid and vim.api.nvim_win_is_valid(M.current_winid) then
         vim.api.nvim_win_close(M.current_winid, true)
     end
     M.current_winid = create_image_float(width, height)
 
-    -- Get center position for image
     local x, y = get_center_position(width, height)
 
-    -- Prepare control data
     local control = {
         a = "T", -- Transmit and display
         f = 100, -- PNG format
@@ -170,23 +176,17 @@ function M.show_image(base64_data, width, height)
         h = height -- Image height
     }
 
-    -- Build control string
     local control_str = ""
     for k, v in pairs(control) do
         control_str = control_str .. k .. "=" .. v .. ","
     end
-    control_str = control_str:sub(1, -2) -- Remove trailing comma
+    control_str = control_str:sub(1, -2)
 
-    -- Split data into chunks if needed
     local chunks = get_chunked(base64_data)
 
-    -- Save cursor position
     write("\x1b[s")
-
-    -- Move cursor to center position
     write(string.format("\x1b[%d;%dH", y, x))
 
-    -- Write image data in chunks
     for i = 1, #chunks do
         local chunk_control = control_str
         if i < #chunks then
@@ -195,24 +195,16 @@ function M.show_image(base64_data, width, height)
             chunk_control = chunk_control .. ",m=0"
         end
 
-        -- Write graphics command
-        write(string.format("\x1b_G%s;%s\x1b\\", chunk_control, chunks[i]))
+        local cmd = string.format("\x1b_G%s;%s\x1b\\", chunk_control, chunks[i])
+        write(tmux_wrap(cmd))
 
-        -- Only need control params for first chunk
         control_str = "m=" .. (i == #chunks - 1 and "0" or "1")
-
-        -- Small delay between chunks
         vim.loop.sleep(1)
     end
 
-    -- Restore cursor position
     write("\x1b[u")
-
-    -- Setup autocmd to clear image on cursor movement
     setup_cursor_autocmd()
 end
 
 return M
-
-
 
