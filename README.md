@@ -27,7 +27,7 @@ https://youtu.be/ugyOw3Hop08
 To harness the full potential of `pyrola`, you must first install the following essential Python packages:
 
 ```bash
-pip install pynvim jupyter-client prompt-toolkit pillow
+pip install pynvim jupyter-client prompt-toolkit pillow pygments
 ```
 For image viewer, high quality image preview are based kitty graphic protocol,a  rough pixelized resolution image in console can be available for all terminal.
 In addition, you will need to install [timg](https://github.com/hzeller/timg), a terminal-based image viewer. For users on Debian-based systems, the installation can be accomplished with the following command:
