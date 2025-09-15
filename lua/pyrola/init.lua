@@ -1,5 +1,4 @@
 local api, ts = vim.api, vim.treesitter
-local parsers = require "nvim-treesitter.parsers"
 
 local M = {
     config = {
@@ -368,7 +367,7 @@ end
 
 function M.send_statement_definition()
     handle_cursor_move()
-    local parser = parsers.get_parser(0)
+    local parser = assert(vim.treesitter.get_parser(0))
     local root = parser:parse()[1]:root()
     local node = vim.treesitter.get_node()
 
