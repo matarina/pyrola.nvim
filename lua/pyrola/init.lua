@@ -61,7 +61,7 @@ local function open_terminal()
         local nvim_socket = vim.v.servername
         local term_cmd =
             string.format(
-            "python %s/rplugin/python3/console.py --existing %s --filetype %s --nvim-socket %s",
+            "python3 %s/rplugin/python3/console.py --existing %s --filetype %s --nvim-socket %s",
             console_path,
             M.connection_file_path,
             M.filetype,
