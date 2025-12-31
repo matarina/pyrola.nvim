@@ -44,12 +44,32 @@ local function open_terminal()
     local statusline_format = string.format("Kernel: %s  |  Line : %%l ", kernelname)
     vim.api.nvim_win_set_option(winid, "statusline", statusline_format)
 
-    M.connection_file_path = vim.fn.InitKernel(kernelname)
+    local success, result = pcall(vim.fn.InitKernel, kernelname)
+    if not success then
+        if string.find(result, "No such kernel") then
+            vim.notify(
+                string.format(
+                    "Pyrola: Kernel '%s' not found. Please install it manually (see README) and update setup config.",
+                    kernelname
+                ),
+                vim.log.levels.ERROR
+            )
+            return
+        else
+            error(result)
+        end
+    end
+
+    M.connection_file_path = result
 
     local function get_plugin_path()
+        if M.plugin_path then
+            return M.plugin_path
+        end
         local runtime_paths = vim.api.nvim_list_runtime_paths()
         for _, path in ipairs(runtime_paths) do
             if path:match("pyrola.nvim$") then
+                M.plugin_path = path
                 return path
             end
         end
@@ -146,10 +166,12 @@ local function send_message(message)
                         api.nvim_chan_send(M.term.chanid, prefix .. message .. suffix .. "\n")
                     end
 
-                    vim.api.nvim_win_set_cursor(
-                        M.term.winid,
-                        {vim.api.nvim_buf_line_count(vim.api.nvim_win_get_buf(M.term.winid)), 0}
-                    )
+                    if vim.api.nvim_win_is_valid(M.term.winid) then
+                        vim.api.nvim_win_set_cursor(
+                            M.term.winid,
+                            {vim.api.nvim_buf_line_count(vim.api.nvim_win_get_buf(M.term.winid)), 0}
+                        )
+                    end
                     timer:close()
                 end
             )
@@ -286,7 +308,47 @@ local function create_pretty_float(content)
     return winid, bufnr
 end
 
+local function check_and_install_dependencies()
+    local python_executable = vim.g.python3_host_prog or "python3"
+
+    if vim.fn.executable(python_executable) == 0 then
+        return
+    end
+
+    local check_cmd = {
+        python_executable,
+        "-c",
+        "import pynvim, jupyter_client, prompt_toolkit, PIL, pygments"
+    }
+
+    vim.fn.system(check_cmd)
+
+    if vim.v.shell_error ~= 0 then
+        local choice = vim.fn.confirm(
+            "Pyrola: Required python packages are missing. Install them?",
+            "&Yes\n&No",
+            1
+        )
+        if choice == 1 then
+            vim.notify("Pyrola: Installing dependencies...", vim.log.levels.INFO)
+            vim.fn.jobstart({
+                python_executable, "-m", "pip", "install",
+                "pynvim", "jupyter-client", "prompt-toolkit", "pillow", "pygments"
+            }, {
+                on_exit = function(_, return_val)
+                    if return_val == 0 then
+                        vim.notify("Pyrola: Dependencies installed successfully. Please restart Neovim.", vim.log.levels.INFO)
+                    else
+                        vim.notify("Pyrola: Failed to install dependencies.", vim.log.levels.ERROR)
+                    end
+                end
+            })
+        end
+    end
+end
+
 function M.setup(opts)
+    vim.schedule(check_and_install_dependencies)
     M.config = vim.tbl_deep_extend("force", M.config, opts or {})
     return M
 end

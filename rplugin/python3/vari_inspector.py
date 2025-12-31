@@ -5,236 +5,236 @@ import inspect
 import types
 from collections import Counter, defaultdict
 
+if 'python_Var_inspector' not in globals():
+    class UniversalInspector:
+        def __init__(self):
+            self.output_lines = []
 
-class UniversalInspector:
-    def __init__(self):
-        self.output_lines = []
+        def _format_line(self, attr_name: str, value) -> str:
+            return f"{attr_name:<15}║ {value}"
 
-    def _format_line(self, attr_name: str, value) -> str:
-        return f"{attr_name:<15}║ {value}"
+        def _content_line(self, attr_name: str, value) -> str:
+            return f"{'═' * 50} \\n{value}"
 
-    def _content_line(self, attr_name: str, value) -> str:
-        return f"{'═' * 50} \\n{value}"
+        def _add_line(self, line: str):
+            self.output_lines.append(line)
 
-    def _add_line(self, line: str):
-        self.output_lines.append(line)
+        def _add_section(self, content: list):
+            for line in content:
+                self._add_line(str(line))
 
-    def _add_section(self, content: list):
-        for line in content:
-            self._add_line(str(line))
+        def _inspect_basic_type(self, obj):
+            basic_info = [
+                self._format_line("Type", type(obj).__name__),
+                self._format_line("Memory", f"{sys.getsizeof(obj)} bytes")
+            ]
 
-    def _inspect_basic_type(self, obj):
-        basic_info = [
-            self._format_line("Type", type(obj).__name__),
-            self._format_line("Memory", f"{sys.getsizeof(obj)} bytes")
-        ]
+            if isinstance(obj, (str, bytes, list, tuple, set, dict)):
+                basic_info.append(self._format_line("Length", len(obj)))
 
-        if isinstance(obj, (str, bytes, list, tuple, set, dict)):
-            basic_info.append(self._format_line("Length", len(obj)))
+            if isinstance(obj, (str, bytes, list, tuple, set)):
+                try:
+                    basic_info.append(self._format_line("Count", dict(Counter(obj))))
+                except:
+                    pass
+            basic_info.append(self._content_line("DataContent", repr(obj)))
 
-        if isinstance(obj, (str, bytes, list, tuple, set)):
+            self._add_section(basic_info)
+
+        def _inspect_pandas_series(self, obj):
+            series_info = [
+                self._format_line("Type", "Pandas Series"),
+                self._format_line("Length", len(obj)),
+                self._format_line("Dtype", obj.dtype),
+                self._format_line("Name", obj.name),
+                self._format_line("Memory", f"{obj.memory_usage(deep=True)} bytes"),
+                self._format_line("Null Count", obj.isnull().sum()),
+                self._format_line("Unique", obj.is_unique),
+            ]
+
+            series_info.append(self._format_line("Head", obj.to_dict()))
+
+            self._add_section(series_info)
+
+        def _inspect_pandas_index(self, obj):
+            index_info = [
+                self._format_line("Type", type(obj).__name__),
+                self._format_line("Length", len(obj)),
+                self._format_line("Dtype", obj.dtype),
+                self._format_line("Name", obj.name),
+                self._format_line("Memory", f"{obj.memory_usage()} bytes"),
+                self._format_line("Is Unique", obj.is_unique),
+            ]
+
+            index_info.append(self._format_line("DataContent", list(obj)))
+
+            self._add_section(index_info)
+
+
+        def _inspect_pandas_dataframe(self, obj):
+            # Get basic DataFrame info
+            df_info = [
+                self._format_line("Type", "Pandas DataFrame"),
+                self._format_line("Shape", f"{obj.shape[0]} rows × {obj.shape[1]} columns"),
+                self._format_line("Memory", f"{obj.memory_usage(deep=True).sum()} bytes"),
+                self._format_line("Columns", list(obj.columns)),
+                self._format_line("dtypes", obj.dtypes.to_dict()),
+                "\\nData Content:"
+            ]
+            self._add_section(df_info)
+
+            # Format the DataFrame as a plain text table
+            def format_value(v):
+                if pd.isna(v):
+                    return "NaN"
+                elif isinstance(v, (int, float)):
+                    return f"{v:>8}"
+                else:
+                    return f"{str(v):>8}"
+
+            # Get string representations of all values
+            str_df = obj.astype(str)
+
+            # Get maximum width for each column (including header)
+            col_widths = {}
+            for col in obj.columns:
+                col_widths[col] = max(
+                    len(str(col)),
+                    max(str_df[col].str.len().max(), 8)
+                ) + 2  # Add padding
+
+            # Create header
+            header = "".join(f"{str(col):>{col_widths[col]}}" for col in obj.columns)
+            separator = "".join("-" * width for width in col_widths.values())
+
+            # Create rows
+            rows = []
+            for idx, row in obj.iterrows():
+                row_str = "".join(f"{format_value(val):>{col_widths[col]}}"
+                                 for col, val in row.items())
+                rows.append(f"{idx:>3} {row_str}")
+
+            # Combine all parts
+            table = [
+                header,
+                separator,
+                *rows
+            ]
+
+            self._add_section(table)
+
+        def _inspect_class_or_instance(self, obj):
+            is_class = inspect.isclass(obj)
+            cls = obj if is_class else obj.__class__
+
+            # Basic class info
+            basic_info = [
+                self._format_line("Type", "Class" if is_class else "Instance"),
+                self._format_line("Name", cls.__name__),
+                self._format_line("Module", cls.__module__),
+                self._format_line("Base classes", [base.__name__ for base in cls.__bases__])
+            ]
+            self._add_section(basic_info)
+
+            # Categorize attributes
+            attrs = defaultdict(list)
+            for name, value in inspect.getmembers(obj):
+                if name.startswith('__'):
+                    continue
+
+                if inspect.ismethod(value) or inspect.isfunction(value):
+                    attrs['Methods'].append((name, value))
+                elif isinstance(value, property):
+                    attrs['Properties'].append((name, value))
+                elif isinstance(value, (staticmethod, classmethod)):
+                    attrs['Class/Static Methods'].append((name, value))
+                else:
+                    attrs['Attributes'].append((name, value))
+
+            # Display attributes by category
+            for category, items in attrs.items():
+                if items:
+                    category_info = ["\\n" + category + ":"]  # Added category header
+                    for name, value in sorted(items, key=lambda x: x[0]):
+                        try:
+                            if inspect.ismethod(value) or inspect.isfunction(value):
+                                sig = inspect.signature(value)
+                                doc = value.__doc__ and value.__doc__.strip()
+                                info = f"  {name}{sig}"
+                                if doc:
+                                    info += f"\\n    Doc: {doc}"
+                            else:
+                                info = f"  {name}: {type(value).__name__} = {repr(value)}"
+                        except Exception as e:
+                            info = f"  {name}: <Error: {str(e)}>"
+                        category_info.append(info)
+                    self._add_section(category_info)
+
+        def _inspect_function(self, obj):
+            func_info = [
+                self._format_line("Type", "Function"),
+                self._format_line("Name", obj.__name__),
+                self._format_line("Module", obj.__module__),
+                self._format_line("Signature", str(inspect.signature(obj))),
+                self._format_line("Docstring", obj.__doc__ and obj.__doc__.strip())
+            ]
+            self._add_section(func_info)
+
+            # Get source code if available
             try:
-                basic_info.append(self._format_line("Count", dict(Counter(obj))))
-            except:
+                source = inspect.getsource(obj)
+                self._add_section(["Source Code:", source])
+            except Exception:
                 pass
-        basic_info.append(self._content_line("DataContent", repr(obj)))
 
-        self._add_section(basic_info)
+        def _inspect_numpy_array(self, obj):
+            array_info = [
+                self._format_line("Type", "NumPy Array"),
+                self._format_line("Shape", obj.shape),
+                self._format_line("Dtype", obj.dtype),
+                self._format_line("Size", obj.size),
+                self._format_line("NDim", obj.ndim),
+                self._content_line("DataContent", str(obj))
+            ]
+            self._add_section(array_info)
 
-    def _inspect_pandas_series(self, obj):
-        series_info = [
-            self._format_line("Type", "Pandas Series"),
-            self._format_line("Length", len(obj)),
-            self._format_line("Dtype", obj.dtype),
-            self._format_line("Name", obj.name),
-            self._format_line("Memory", f"{obj.memory_usage(deep=True)} bytes"),
-            self._format_line("Null Count", obj.isnull().sum()),
-            self._format_line("Unique", obj.is_unique),
-        ]
+        def _inspect_torch_tensor(self, obj):
+            tensor_info = [
+                self._format_line("Type", "PyTorch Tensor"),
+                self._format_line("Shape", obj.shape),
+                self._format_line("Dtype", obj.dtype),
+                self._format_line("Device", obj.device),
+                self._format_line("Requires Grad", obj.requires_grad),
+                self._content_line("DataContent", str(obj))
+            ]
+            self._add_section(tensor_info)
 
-        series_info.append(self._format_line("Head", obj.to_dict()))
+        def inspect(self, obj) -> str:
+            self.output_lines = []
 
-        self._add_section(series_info)
-
-    def _inspect_pandas_index(self, obj):
-        index_info = [
-            self._format_line("Type", type(obj).__name__),
-            self._format_line("Length", len(obj)),
-            self._format_line("Dtype", obj.dtype),
-            self._format_line("Name", obj.name),
-            self._format_line("Memory", f"{obj.memory_usage()} bytes"),
-            self._format_line("Is Unique", obj.is_unique),
-        ]
-
-        index_info.append(self._format_line("DataContent", list(obj)))
-
-        self._add_section(index_info)
-
-
-    def _inspect_pandas_dataframe(self, obj):
-        # Get basic DataFrame info
-        df_info = [
-            self._format_line("Type", "Pandas DataFrame"),
-            self._format_line("Shape", f"{obj.shape[0]} rows × {obj.shape[1]} columns"),
-            self._format_line("Memory", f"{obj.memory_usage(deep=True).sum()} bytes"),
-            self._format_line("Columns", list(obj.columns)),
-            self._format_line("dtypes", obj.dtypes.to_dict()),
-            "\\nData Content:"
-        ]
-        self._add_section(df_info)
-
-        # Format the DataFrame as a plain text table
-        def format_value(v):
-            if pd.isna(v):
-                return "NaN"
-            elif isinstance(v, (int, float)):
-                return f"{v:>8}"
+            # Determine the type and call appropriate inspector
+            if (inspect.isclass(obj) and obj.__module__ == '__main__') or (not inspect.isclass(obj) and obj.__class__.__module__ == '__main__'):
+                self._inspect_class_or_instance(obj)
+            elif inspect.isfunction(obj) or inspect.ismethod(obj):
+                self._inspect_function(obj)
+            elif "pandas" in sys.modules and isinstance(obj, pd.Series):
+                self._inspect_pandas_series(obj)
+            elif "pandas" in sys.modules and isinstance(obj, pd.Index):
+                self._inspect_pandas_index(obj)
+            elif "numpy" in sys.modules and isinstance(obj, np.ndarray):
+                self._inspect_numpy_array(obj)
+            elif "torch" in sys.modules and isinstance(obj, torch.Tensor):
+                self._inspect_torch_tensor(obj)
+            elif "pandas" in sys.modules and isinstance(obj, pd.DataFrame):
+                print("pandas dataframe")
+                self._inspect_pandas_dataframe(obj)
             else:
-                return f"{str(v):>8}"
+                self._inspect_basic_type(obj)
 
-        # Get string representations of all values
-        str_df = obj.astype(str)
+            return "\\n".join(self.output_lines)
+    python_Var_inspector = UniversalInspector()
 
-        # Get maximum width for each column (including header)
-        col_widths = {}
-        for col in obj.columns:
-            col_widths[col] = max(
-                len(str(col)),
-                max(str_df[col].str.len().max(), 8)
-            ) + 2  # Add padding
-
-        # Create header
-        header = "".join(f"{str(col):>{col_widths[col]}}" for col in obj.columns)
-        separator = "".join("-" * width for width in col_widths.values())
-
-        # Create rows
-        rows = []
-        for idx, row in obj.iterrows():
-            row_str = "".join(f"{format_value(val):>{col_widths[col]}}"
-                             for col, val in row.items())
-            rows.append(f"{idx:>3} {row_str}")
-
-        # Combine all parts
-        table = [
-            header,
-            separator,
-            *rows
-        ]
-
-        self._add_section(table)
-
-    def _inspect_class_or_instance(self, obj):
-        is_class = inspect.isclass(obj)
-        cls = obj if is_class else obj.__class__
-
-        # Basic class info
-        basic_info = [
-            self._format_line("Type", "Class" if is_class else "Instance"),
-            self._format_line("Name", cls.__name__),
-            self._format_line("Module", cls.__module__),
-            self._format_line("Base classes", [base.__name__ for base in cls.__bases__])
-        ]
-        self._add_section(basic_info)
-
-        # Categorize attributes
-        attrs = defaultdict(list)
-        for name, value in inspect.getmembers(obj):
-            if name.startswith('__'):
-                continue
-
-            if inspect.ismethod(value) or inspect.isfunction(value):
-                attrs['Methods'].append((name, value))
-            elif isinstance(value, property):
-                attrs['Properties'].append((name, value))
-            elif isinstance(value, (staticmethod, classmethod)):
-                attrs['Class/Static Methods'].append((name, value))
-            else:
-                attrs['Attributes'].append((name, value))
-
-        # Display attributes by category
-        for category, items in attrs.items():
-            if items:
-                category_info = ["\\n" + category + ":"]  # Added category header
-                for name, value in sorted(items, key=lambda x: x[0]):
-                    try:
-                        if inspect.ismethod(value) or inspect.isfunction(value):
-                            sig = inspect.signature(value)
-                            doc = value.__doc__ and value.__doc__.strip()
-                            info = f"  {name}{sig}"
-                            if doc:
-                                info += f"\\n    Doc: {doc}"
-                        else:
-                            info = f"  {name}: {type(value).__name__} = {repr(value)}"
-                    except Exception as e:
-                        info = f"  {name}: <Error: {str(e)}>"
-                    category_info.append(info)
-                self._add_section(category_info)
-
-    def _inspect_function(self, obj):
-        func_info = [
-            self._format_line("Type", "Function"),
-            self._format_line("Name", obj.__name__),
-            self._format_line("Module", obj.__module__),
-            self._format_line("Signature", str(inspect.signature(obj))),
-            self._format_line("Docstring", obj.__doc__ and obj.__doc__.strip())
-        ]
-        self._add_section(func_info)
-
-        # Get source code if available
-        try:
-            source = inspect.getsource(obj)
-            self._add_section(["Source Code:", source])
-        except Exception:
-            pass
-
-    def _inspect_numpy_array(self, obj):
-        array_info = [
-            self._format_line("Type", "NumPy Array"),
-            self._format_line("Shape", obj.shape),
-            self._format_line("Dtype", obj.dtype),
-            self._format_line("Size", obj.size),
-            self._format_line("NDim", obj.ndim),
-            self._content_line("DataContent", str(obj))
-        ]
-        self._add_section(array_info)
-
-    def _inspect_torch_tensor(self, obj):
-        tensor_info = [
-            self._format_line("Type", "PyTorch Tensor"),
-            self._format_line("Shape", obj.shape),
-            self._format_line("Dtype", obj.dtype),
-            self._format_line("Device", obj.device),
-            self._format_line("Requires Grad", obj.requires_grad),
-            self._content_line("DataContent", str(obj))
-        ]
-        self._add_section(tensor_info)
-
-    def inspect(self, obj) -> str:
-        self.output_lines = []
-
-        # Determine the type and call appropriate inspector
-        if (inspect.isclass(obj) and obj.__module__ == '__main__') or (not inspect.isclass(obj) and obj.__class__.__module__ == '__main__'):
-            self._inspect_class_or_instance(obj)
-        elif inspect.isfunction(obj) or inspect.ismethod(obj):
-            self._inspect_function(obj)
-        elif "pandas" in sys.modules and isinstance(obj, pd.Series):
-            self._inspect_pandas_series(obj)
-        elif "pandas" in sys.modules and isinstance(obj, pd.Index):
-            self._inspect_pandas_index(obj)
-        elif "numpy" in sys.modules and isinstance(obj, np.ndarray):
-            self._inspect_numpy_array(obj)
-        elif "torch" in sys.modules and isinstance(obj, torch.Tensor):
-            self._inspect_torch_tensor(obj)
-        elif "pandas" in sys.modules and isinstance(obj, pd.DataFrame):
-            print("pandas dataframe")
-            self._inspect_pandas_dataframe(obj)
-        else:
-            self._inspect_basic_type(obj)
-
-        return "\\n".join(self.output_lines)
-python_Var_inspector = UniversalInspector()
 var_output = python_Var_inspector.inspect(<<<VAR>>>)
-b = "asdfasdfasdf"
 print(var_output)
 """
     return python_inspector.replace("<<<VAR>>>", str(input_var))

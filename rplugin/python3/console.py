@@ -1,5 +1,4 @@
 import pynvim
-import re
 import queue
 from threading import Thread
 import os
@@ -287,7 +286,7 @@ class ReplInterpreter:
                 except Empty:
                     await self.handle_iopub_msgs(msg_id)
 
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)
 
             while self.client.is_alive():
                 if self._interrupt_requested:
@@ -304,7 +303,7 @@ class ReplInterpreter:
                         self.in_multiline = False
                         return content["status"] == "ok"
                 except Empty:
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.05)
 
         finally:
             self._executing = False
