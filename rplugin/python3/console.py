@@ -1,36 +1,79 @@
-import pynvim
-import queue
-from threading import Thread
-import os
-from pathlib import Path
-from PIL import Image
-import io
-import base64
-import sys
-from prompt_toolkit.output import ColorDepth
-import signal
-import json
-import time
-import asyncio
-from prompt_toolkit.formatted_text import HTML
-from typing import Optional, List
-from jupyter_client import BlockingKernelClient
-from queue import Empty
 import argparse
+import atexit
+import asyncio
+import base64
+import io
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from queue import Empty, Queue
+from threading import Thread
+from typing import List, Optional
+
+import pynvim
+from jupyter_client import BlockingKernelClient
+from PIL import Image
 from prompt_toolkit import print_formatted_text
+from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.lexers import PygmentsLexer
 from prompt_toolkit.shortcuts import PromptSession
 from prompt_toolkit.styles import Style
-from prompt_toolkit.layout.processors import ConditionalProcessor, BeforeInput
-from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.filters import to_filter
-from prompt_toolkit.lexers import PygmentsLexer
-from pygments.lexers import Python3Lexer, CppLexer, TextLexer
+from pygments.lexers import CppLexer, Python3Lexer, TextLexer
 from pygments.lexers.r import SLexer
-from pygments.token import Token
+
+IMAGE_MIME_MAP = {
+    "image/png": "png",
+    "image/jpeg": "jpeg",
+    "image/svg+xml": "svg",
+}
+IMAGE_MIME_TYPES = tuple(IMAGE_MIME_MAP.keys())
+
+
+def _gradient_ansi_lines(lines, start, end):
+    if not lines:
+        return ""
+    if len(lines) == 1:
+        colors = [start]
+    else:
+        colors = []
+        for idx in range(len(lines)):
+            ratio = idx / (len(lines) - 1)
+            r = int(start[0] + (end[0] - start[0]) * ratio)
+            g = int(start[1] + (end[1] - start[1]) * ratio)
+            b = int(start[2] + (end[2] - start[2]) * ratio)
+            colors.append((r, g, b))
+    colored = []
+    for line, (r, g, b) in zip(lines, colors):
+        colored.append(f"\x1b[38;2;{r};{g};{b}m{line}\x1b[0m")
+    return "\n".join(colored)
+
+
+def _extract_image_data(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return bytes(value).decode("utf-8")
+        except Exception:
+            return ""
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return ""
+        if all(isinstance(x, str) for x in value):
+            return "".join(value)
+        if all(isinstance(x, (bytes, bytearray)) for x in value):
+            try:
+                return b"".join(value).decode("utf-8")
+            except Exception:
+                return ""
+        return _extract_image_data(value[0])
+    return ""
 
 
 class ReplInterpreter:
@@ -41,10 +84,14 @@ class ReplInterpreter:
         self._execution_state = "idle"
         self.kernel_info = {}
         self.in_multiline = False
-        self.multiline_buffer = []
         self._interrupt_requested = False
         self._image_debug = os.environ.get("PYROLA_IMAGE_DEBUG", "0") == "1"
         self._auto_indent = os.environ.get("PYROLA_AUTO_INDENT", "0") == "1"
+        self._temp_paths = set()
+        try:
+            self._temp_dir = tempfile.TemporaryDirectory(prefix="pyrola-")
+        except Exception:
+            self._temp_dir = None
 
         # Setup prompt toolkit
         self.history = InMemoryHistory()
@@ -61,7 +108,7 @@ class ReplInterpreter:
             self.lexer = PygmentsLexer(TextLexer)
 
         self.nvim = None
-        self.nvim_queue = queue.Queue()
+        self.nvim_queue = Queue()
         self.nvim_thread = None
 
         try:
@@ -117,10 +164,11 @@ class ReplInterpreter:
             pass
 
         self._setup_signal_handlers()
+        atexit.register(self._cleanup_resources)
 
         if connection_file:
             try:
-                with open(connection_file) as f:
+                with open(connection_file, "r", encoding="utf-8") as f:
                     connection_info = json.load(f)
                 self.client = BlockingKernelClient()
                 self.client.load_connection_info(connection_info)
@@ -181,17 +229,30 @@ class ReplInterpreter:
         return kb
 
     async def interact_async(self, banner: Optional[str] = None):
+        logo_lines = [
+            "██████╗ ██╗   ██╗██████╗  ██████╗ ██╗      █████╗ ",
+            "██╔══██╗╚██╗ ██╔╝██╔══██╗██╔═══██╗██║     ██╔══██╗",
+            "██████╔╝ ╚████╔╝ ██████╔╝██║   ██║██║     ███████║",
+            "██╔═══╝   ╚██╔╝  ██╔══██╗██║   ██║██║     ██╔══██║",
+            "██║        ██║   ██║  ██║╚██████╔╝███████╗██║  ██║",
+            "╚═╝        ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝",
+        ]
+        logo = _gradient_ansi_lines(logo_lines, (255, 196, 107), (255, 108, 0))
+        print_formatted_text(ANSI(logo))
         print_formatted_text(
             HTML(
-                "<orange>\n    Welcome to Pyrola! kernel</orange> <ansired>{}</ansired> <orange>initialized!\n</orange>".format(
-                    self.kernelname
-                )
+                f"<orange>\n    Welcome to Pyrola! kernel</orange> <ansired>{self.kernelname}</ansired> <orange>initialized!\n</orange>"
             ),
             style=self.style,
         )
 
         while True:
             try:
+                if self.nvim:
+                    try:
+                        self.nvim.command('lua require("pyrola")._on_repl_ready()')
+                    except Exception:
+                        pass
                 # Get input with dynamic prompt
                 code = await self.session.prompt_async()
 
@@ -390,14 +451,16 @@ class ReplInterpreter:
                         new_width = orig_width
                         new_height = orig_height
                         img_base64 = data
-                    import tempfile
                     tmp_path = None
                     try:
                         with tempfile.NamedTemporaryFile(
-                            suffix=".b64", delete=False
+                            suffix=".b64",
+                            delete=False,
+                            dir=self._temp_dir.name if self._temp_dir else None,
                         ) as tmp:
                             tmp.write(img_base64.encode("utf-8"))
                             tmp_path = tmp.name
+                        self._register_temp_path(tmp_path)
                         if self._image_debug:
                             print(
                                 f"[pyrola] wrote image b64 temp: {tmp_path} bytes={len(img_base64)}",
@@ -421,10 +484,7 @@ class ReplInterpreter:
                         self.nvim.command("unlet g:pyrola_image_height")
                     finally:
                         if tmp_path:
-                            try:
-                                os.unlink(tmp_path)
-                            except Exception:
-                                pass
+                            self._cleanup_temp_path(tmp_path)
                 except Exception as e:
                     print(f"Error in Neovim thread: {e}", file=sys.stderr)
             except Exception as e:
@@ -438,33 +498,34 @@ class ReplInterpreter:
             self.nvim_queue.put(None)  # Send exit signal
             self.nvim_thread.join(timeout=1.0)
 
-    async def handle_iopub_msgs(self, msg_id):
-        _imagemime = {
-            "image/png": "png",
-            "image/jpeg": "jpeg",
-            "image/svg+xml": "svg",
-        }
-        def _extract_image_data(value):
-            if isinstance(value, str):
-                return value
-            if isinstance(value, (bytes, bytearray)):
-                try:
-                    return bytes(value).decode("utf-8")
-                except Exception:
-                    return ""
-            if isinstance(value, (list, tuple)):
-                if not value:
-                    return ""
-                if all(isinstance(x, str) for x in value):
-                    return "".join(value)
-                if all(isinstance(x, (bytes, bytearray)) for x in value):
-                    try:
-                        return b"".join(value).decode("utf-8")
-                    except Exception:
-                        return ""
-                return _extract_image_data(value[0])
-            return ""
+    def _register_temp_path(self, path):
+        if path:
+            self._temp_paths.add(path)
 
+    def _cleanup_temp_path(self, path):
+        if not path:
+            return
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+        self._temp_paths.discard(path)
+
+    def _cleanup_temp_paths(self):
+        for path in list(self._temp_paths):
+            self._cleanup_temp_path(path)
+
+    def _cleanup_resources(self):
+        self._cleanup()
+        self._cleanup_temp_paths()
+        if self._temp_dir:
+            try:
+                self._temp_dir.cleanup()
+            except Exception:
+                pass
+            self._temp_dir = None
+
+    async def handle_iopub_msgs(self, msg_id):
         while self.client.iopub_channel.msg_ready():
             msg = self.client.get_iopub_msg()
             msg_type = msg["header"]["msg_type"]
@@ -489,7 +550,7 @@ class ReplInterpreter:
                     sys.stderr.write(content["text"])
                     sys.stderr.flush()
 
-            elif msg_type in ["display_data", "execute_result"]:
+            elif msg_type in ("display_data", "execute_result"):
                 if self._pending_clearoutput:
                     sys.stdout.write("\r")
                     self._pending_clearoutput = False
@@ -498,19 +559,19 @@ class ReplInterpreter:
                 data = content.get("data", {})
 
                 if "text/plain" in data and not any(
-                    mime in data for mime in _imagemime
+                    mime in data for mime in IMAGE_MIME_TYPES
                 ):
                     text = data.get("text/plain", "")
                     if isinstance(text, str):
-                        content = text
+                        text_output = text
                     else:
-                        content = str(text[0]) if text else ''
-                    print(content)
+                        text_output = str(text[0]) if text else ""
+                    print(text_output)
                     sys.stdout.flush()
 
                 # Handle image data (prefer PNG for Neovim display)
                 image_mime = None
-                for candidate in ("image/png", "image/jpeg", "image/svg+xml"):
+                for candidate in IMAGE_MIME_TYPES:
                     if candidate in data:
                         image_mime = candidate
                         break
@@ -525,13 +586,13 @@ class ReplInterpreter:
                             file=sys.stderr,
                         )
 
-                    import tempfile
-                    import subprocess
-
+                    tmp_path = None
                     try:
-                        ext = _imagemime[image_mime]
+                        ext = IMAGE_MIME_MAP[image_mime]
                         with tempfile.NamedTemporaryFile(
-                            suffix=f".{ext}", delete=False
+                            suffix=f".{ext}",
+                            delete=False,
+                            dir=self._temp_dir.name if self._temp_dir else None,
                         ) as tmp:
                             if image_mime == "image/svg+xml":
                                 tmp.write(image_data.encode("utf-8"))
@@ -539,6 +600,7 @@ class ReplInterpreter:
                                 img_bytes = base64.b64decode(image_data)
                                 tmp.write(img_bytes)
                             tmp_path = tmp.name
+                        self._register_temp_path(tmp_path)
 
                         try:
                             subprocess.run(["timg", "-p", "q", tmp_path], check=True)
@@ -554,11 +616,11 @@ class ReplInterpreter:
                             FileNotFoundError,
                         ) as e:
                             print(f"Failed to display image: {e}")
-
-                        os.unlink(tmp_path)
                     except Exception as e:
                         print(f"Error handling image: {e}")
-
+                    finally:
+                        if tmp_path:
+                            self._cleanup_temp_path(tmp_path)
 
             elif msg_type == "error":
                 content = msg["content"]
@@ -585,7 +647,10 @@ def main():
         os.environ["NVIM_LISTEN_ADDRESS"] = args.nvim_socket
 
     interpreter = ReplInterpreter(connection_file=args.existing, lan=args.filetype)
-    interpreter.interact()
+    try:
+        interpreter.interact()
+    finally:
+        interpreter._cleanup_resources()
 
 
 if __name__ == "__main__":

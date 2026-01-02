@@ -54,12 +54,14 @@ Subsequently, you can install `pyrola` using `lazy.nvim` by incorporating the fo
                 cpp = "xcpp14"
             },
             split_horizen = false,
-            split_ratio = 0.3
+            split_ratio = 0.3,
+            send_buffer_key = "<leader>vb"
         })
 
         -- Key mappings
         vim.keymap.set("n", "<Enter>", function() pyrola.send_statement_definition() end, { noremap = true })
         vim.keymap.set("v", '<leader>vs', function() require('pyrola').send_visual_to_repl() end, { noremap = true})
+        vim.keymap.set("n", "<leader>vb", function() pyrola.send_buffer_to_repl() end, { noremap = true })
         vim.keymap.set("n", "<leader>is", function() pyrola.inspect() end, { noremap = true })
 
         -- Image history keybindings
@@ -113,6 +115,11 @@ vim.api.nvim_create_autocmd({"BufEnter", "BufWinEnter"}, {
         -- Execute the selected visual block of code
         vim.keymap.set("v", '<leader>vs', function()
             require('pyrola').send_visual_to_repl()
+        end, { noremap = true })
+
+        -- Execute the whole buffer
+        vim.keymap.set("n", '<leader>vb', function()
+            require('pyrola').send_buffer_to_repl()
         end, { noremap = true })
 
         -- Query information about the specific object under the cursor

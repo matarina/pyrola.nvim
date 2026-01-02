@@ -20,6 +20,11 @@ try:
 except Exception:
     torch = None
 
+MAX_PREVIEW_ROWS = 20
+MAX_PREVIEW_COLS = 10
+MAX_SERIES_PREVIEW = 20
+MAX_COUNT_ITEMS = 1000
+
 if 'python_Var_inspector' not in globals():
     class UniversalInspector:
         def __init__(self):
@@ -28,9 +33,6 @@ if 'python_Var_inspector' not in globals():
         def _format_line(self, attr_name: str, value) -> str:
             return f"{attr_name:<15}║ {value}"
 
-        def _content_line(self, attr_name: str, value) -> str:
-            return f"{'═' * 50} \\n{value}"
-
         def _add_line(self, line: str):
             self.output_lines.append(line)
 
@@ -38,7 +40,14 @@ if 'python_Var_inspector' not in globals():
             for line in content:
                 self._add_line(str(line))
 
+        def _section_title(self, title: str):
+            if self.output_lines:
+                self._add_line("")
+            self._add_line(title)
+            self._add_line("-" * 50)
+
         def _inspect_basic_type(self, obj):
+            self._section_title("Summary")
             basic_info = [
                 self._format_line("Type", type(obj).__name__),
                 self._format_line("Memory", f"{sys.getsizeof(obj)} bytes")
@@ -49,14 +58,17 @@ if 'python_Var_inspector' not in globals():
 
             if isinstance(obj, (str, bytes, list, tuple, set)):
                 try:
-                    basic_info.append(self._format_line("Count", dict(Counter(obj))))
-                except:
+                    if len(obj) <= MAX_COUNT_ITEMS:
+                        basic_info.append(self._format_line("Count", dict(Counter(obj))))
+                except Exception:
                     pass
-            basic_info.append(self._content_line("DataContent", repr(obj)))
 
             self._add_section(basic_info)
+            self._section_title("Content")
+            self._add_section([repr(obj)])
 
         def _inspect_pandas_series(self, obj):
+            self._section_title("Summary")
             series_info = [
                 self._format_line("Type", "Pandas Series"),
                 self._format_line("Length", len(obj)),
@@ -66,12 +78,18 @@ if 'python_Var_inspector' not in globals():
                 self._format_line("Null Count", obj.isnull().sum()),
                 self._format_line("Unique", obj.is_unique),
             ]
-
-            series_info.append(self._format_line("Head", obj.to_dict()))
-
             self._add_section(series_info)
+            self._section_title("Preview")
+            preview = obj if len(obj) <= MAX_SERIES_PREVIEW else obj.head(MAX_SERIES_PREVIEW)
+            preview_info = [self._format_line("Head", preview.to_dict())]
+            if len(obj) > MAX_SERIES_PREVIEW:
+                preview_info.append(
+                    self._format_line("Head Size", f"{MAX_SERIES_PREVIEW} of {len(obj)}")
+                )
+            self._add_section(preview_info)
 
         def _inspect_pandas_index(self, obj):
+            self._section_title("Summary")
             index_info = [
                 self._format_line("Type", type(obj).__name__),
                 self._format_line("Length", len(obj)),
@@ -80,29 +98,34 @@ if 'python_Var_inspector' not in globals():
                 self._format_line("Memory", f"{obj.memory_usage()} bytes"),
                 self._format_line("Is Unique", obj.is_unique),
             ]
-
-            index_info.append(self._format_line("DataContent", list(obj)))
-
             self._add_section(index_info)
+            self._section_title("Preview")
+            preview = obj if len(obj) <= MAX_SERIES_PREVIEW else obj[:MAX_SERIES_PREVIEW]
+            preview_info = [self._format_line("Values", list(preview))]
+            if len(obj) > MAX_SERIES_PREVIEW:
+                preview_info.append(
+                    self._format_line("Preview Size", f"{MAX_SERIES_PREVIEW} of {len(obj)}")
+                )
+            self._add_section(preview_info)
 
 
         def _inspect_pandas_dataframe(self, obj):
             # Get basic DataFrame info
-            max_rows = 20
-            max_cols = 10
             df = obj
             truncated = False
 
-            if df.shape[0] > max_rows:
-                df = df.head(max_rows)
+            rows, cols = df.shape
+            if rows > MAX_PREVIEW_ROWS:
+                df = df.head(MAX_PREVIEW_ROWS)
                 truncated = True
-            if df.shape[1] > max_cols:
-                df = df.iloc[:, :max_cols]
+            if cols > MAX_PREVIEW_COLS:
+                df = df.iloc[:, :MAX_PREVIEW_COLS]
                 truncated = True
 
+            self._section_title("Summary")
             df_info = [
                 self._format_line("Type", "Pandas DataFrame"),
-                self._format_line("Shape", f"{obj.shape[0]} rows × {obj.shape[1]} columns"),
+                self._format_line("Shape", f"{rows} rows × {cols} columns"),
                 self._format_line("Memory", f"{obj.memory_usage(deep=True).sum()} bytes"),
                 self._format_line("Columns", list(obj.columns)),
                 self._format_line("dtypes", obj.dtypes.to_dict()),
@@ -114,48 +137,56 @@ if 'python_Var_inspector' not in globals():
                         f"{df.shape[0]} rows × {df.shape[1]} columns"
                     )
                 )
-            df_info.append("\\nData Content:")
             self._add_section(df_info)
+            self._section_title("Preview")
 
             # Format the DataFrame as a plain text table
-            def format_value(v):
-                if pd is not None and pd.api.types.is_scalar(v):
+            pd_types = pd.api.types
+
+            def format_value(value):
+                if pd_types.is_scalar(value):
                     try:
-                        if pd.isna(v):
+                        if pd.isna(value):
                             return "NaN"
                     except Exception:
                         pass
-                return str(v)
+                return str(value)
 
-            def is_number(v):
-                if pd is not None:
-                    try:
-                        return pd.api.types.is_number(v) and not isinstance(v, bool)
-                    except Exception:
-                        return False
-                return isinstance(v, (int, float)) and not isinstance(v, bool)
+            def is_number(value):
+                try:
+                    return pd_types.is_number(value) and not isinstance(value, bool)
+                except Exception:
+                    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
             # Get string representations of all values
-            str_df = df.applymap(format_value)
+            if hasattr(df, "map"):
+                str_df = df.map(format_value)
+            else:
+                str_df = df.applymap(format_value)
 
             # Get maximum width for each column (including header)
+            col_sep = "  "
             col_widths = {}
             for col in df.columns:
                 col_widths[col] = max(
                     len(str(col)),
                     int(str_df[col].str.len().max() or 0)
-                ) + 2  # Add padding
+                )
 
             index_name = df.index.name if df.index.name is not None else "index"
             index_values = [str(idx) for idx in df.index]
             index_width = max(len(str(index_name)), max((len(v) for v in index_values), default=0))
 
             # Create header
-            header = f"{str(index_name):>{index_width}} " + "".join(
-                f"{str(col):>{col_widths[col]}}" for col in df.columns
+            header = (
+                f"{str(index_name):>{index_width}}"
+                + col_sep
+                + col_sep.join(f"{str(col):>{col_widths[col]}}" for col in df.columns)
             )
-            separator = f"{'-' * index_width} " + "".join(
-                "-" * width for width in col_widths.values()
+            separator = (
+                f"{'-' * index_width}"
+                + col_sep
+                + col_sep.join("-" * width for width in col_widths.values())
             )
 
             # Create rows
@@ -169,7 +200,7 @@ if 'python_Var_inspector' not in globals():
                         row_str.append(cell.rjust(col_widths[col]))
                     else:
                         row_str.append(cell.ljust(col_widths[col]))
-                rows.append(f"{idx:>{index_width}} " + "".join(row_str))
+                rows.append(f"{idx:>{index_width}}" + col_sep + col_sep.join(row_str))
 
             # Combine all parts
             table = [
@@ -185,6 +216,7 @@ if 'python_Var_inspector' not in globals():
             cls = obj if is_class else obj.__class__
 
             # Basic class info
+            self._section_title("Summary")
             basic_info = [
                 self._format_line("Type", "Class" if is_class else "Instance"),
                 self._format_line("Name", cls.__name__),
@@ -211,28 +243,37 @@ if 'python_Var_inspector' not in globals():
             # Display attributes by category
             for category, items in attrs.items():
                 if items:
-                    category_info = ["\\n" + category + ":"]  # Added category header
+                    self._section_title(category)
+                    category_info = []
                     for name, value in sorted(items, key=lambda x: x[0]):
                         try:
                             if inspect.ismethod(value) or inspect.isfunction(value):
-                                sig = inspect.signature(value)
+                                try:
+                                    sig = inspect.signature(value)
+                                except Exception:
+                                    sig = "(...)"
                                 doc = value.__doc__ and value.__doc__.strip()
-                                info = f"  {name}{sig}"
+                                info = f"{name}{sig}"
                                 if doc:
                                     info += f"\\n    Doc: {doc}"
                             else:
-                                info = f"  {name}: {type(value).__name__} = {repr(value)}"
+                                info = f"{name}: {type(value).__name__} = {repr(value)}"
                         except Exception as e:
-                            info = f"  {name}: <Error: {str(e)}>"
+                            info = f"{name}: <Error: {str(e)}>"
                         category_info.append(info)
                     self._add_section(category_info)
 
         def _inspect_function(self, obj):
+            try:
+                signature = str(inspect.signature(obj))
+            except Exception:
+                signature = "<unavailable>"
+            self._section_title("Summary")
             func_info = [
                 self._format_line("Type", "Function"),
                 self._format_line("Name", obj.__name__),
                 self._format_line("Module", obj.__module__),
-                self._format_line("Signature", str(inspect.signature(obj))),
+                self._format_line("Signature", signature),
                 self._format_line("Docstring", obj.__doc__ and obj.__doc__.strip())
             ]
             self._add_section(func_info)
@@ -240,37 +281,44 @@ if 'python_Var_inspector' not in globals():
             # Get source code if available
             try:
                 source = inspect.getsource(obj)
-                self._add_section(["Source Code:", source])
+                self._section_title("Source")
+                self._add_section([source])
             except Exception:
                 pass
 
         def _inspect_numpy_array(self, obj):
+            self._section_title("Summary")
             array_info = [
                 self._format_line("Type", "NumPy Array"),
                 self._format_line("Shape", obj.shape),
                 self._format_line("Dtype", obj.dtype),
                 self._format_line("Size", obj.size),
-                self._format_line("NDim", obj.ndim),
-                self._content_line("DataContent", str(obj))
+                self._format_line("NDim", obj.ndim)
             ]
             self._add_section(array_info)
+            self._section_title("Content")
+            self._add_section([str(obj)])
 
         def _inspect_torch_tensor(self, obj):
+            self._section_title("Summary")
             tensor_info = [
                 self._format_line("Type", "PyTorch Tensor"),
                 self._format_line("Shape", obj.shape),
                 self._format_line("Dtype", obj.dtype),
                 self._format_line("Device", obj.device),
-                self._format_line("Requires Grad", obj.requires_grad),
-                self._content_line("DataContent", str(obj))
+                self._format_line("Requires Grad", obj.requires_grad)
             ]
             self._add_section(tensor_info)
+            self._section_title("Content")
+            self._add_section([str(obj)])
 
         def inspect(self, obj) -> str:
             self.output_lines = []
 
             # Determine the type and call appropriate inspector
-            if (inspect.isclass(obj) and obj.__module__ == '__main__') or (not inspect.isclass(obj) and obj.__class__.__module__ == '__main__'):
+            is_class = inspect.isclass(obj)
+            obj_module = obj.__module__ if is_class else obj.__class__.__module__
+            if obj_module == '__main__':
                 self._inspect_class_or_instance(obj)
             elif inspect.isfunction(obj) or inspect.ismethod(obj):
                 self._inspect_function(obj)
@@ -429,8 +477,3 @@ inspect <- function(obj) {
 cat(inspect(<<<VAR>>>))
 """
     return r_inspector.replace("<<<VAR>>>", str(input_var))
-
-
-
-
-

@@ -1,10 +1,11 @@
 local M = {}
 
+local api = vim.api
+local loop = vim.loop
+local is_tmux = os.getenv("TMUX")
+
 -- Create TTY output handle
-local stdout = vim.loop.new_tty(1, false)
-if not stdout then
-    stdout = nil
-end
+local stdout = loop.new_tty(1, false)
 
 -- Track current image state for focus handling
 M.current_winid = nil
@@ -12,10 +13,18 @@ M.current_image_data = nil
 M.current_image_width = nil
 M.current_image_height = nil
 M.current_float_pos = nil
+M.history = {}
+M.history_index = 0
+M.manager_winid = nil
+M.manager_bufid = nil
+M.manager_active = false
+M.manager_guicursor = nil
+
+local MAX_HISTORY = 50
 
 -- Enable tmux passthrough if needed
 local function enable_tmux_passthrough()
-    if stdout and os.getenv("TMUX") then
+    if stdout and is_tmux then
         local enable_seq = '\027Ptmux;\027\027]52;c;1\007\027\\'
         stdout:write(enable_seq)
     end
@@ -56,27 +65,51 @@ local function read_file(path)
 end
 
 local function tmux_wrap(cmd)
-    if os.getenv("TMUX") then
+    if is_tmux then
         cmd = cmd:gsub('\027', '\027\027')
         return '\027Ptmux;' .. cmd .. '\027\\'
     end
     return cmd
 end
 
-local function pixels_to_cells(pixels, is_width)
-    local cell_width = 10
-    local cell_height = 20
-
-    if is_width then
-        return math.ceil(pixels / cell_width)
-    else
-        return math.ceil(pixels / cell_height)
+local function build_control_string(control)
+    local parts = {}
+    for key, value in pairs(control) do
+        parts[#parts + 1] = string.format("%s=%s", key, value)
     end
+    return table.concat(parts, ",")
 end
 
-local function create_image_float(image_width, image_height)
-    local win_width = vim.api.nvim_get_option("columns")
-    local win_height = vim.api.nvim_get_option("lines")
+local function send_image_chunks(control_str, chunks, x, y)
+    if #chunks == 0 then
+        return
+    end
+    write("\x1b[s")
+    write(string.format("\x1b[%d;%dH", y, x))
+
+    for i = 1, #chunks do
+        local chunk_control = control_str .. ",m=" .. (i < #chunks and "1" or "0")
+        local cmd = string.format("\x1b_G%s;%s\x1b\\", chunk_control, chunks[i])
+        write(tmux_wrap(cmd))
+        loop.sleep(1)
+    end
+
+    write("\x1b[u")
+end
+
+local CELL_WIDTH = 10
+local CELL_HEIGHT = 20
+
+local function pixels_to_cells(pixels, is_width)
+    if is_width then
+        return math.ceil(pixels / CELL_WIDTH)
+    end
+    return math.ceil(pixels / CELL_HEIGHT)
+end
+
+local function create_image_float(image_width, image_height, focus)
+    local win_width = api.nvim_get_option("columns")
+    local win_height = api.nvim_get_option("lines")
 
     -- Convert image pixels to terminal cells
     local width_cells = pixels_to_cells(image_width, true)
@@ -102,18 +135,25 @@ local function create_image_float(image_width, image_height)
         title_pos = "center"
     }
 
-    local bufnr = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_option(bufnr, "modifiable", false)
-    vim.api.nvim_buf_set_option(bufnr, "buftype", "nofile")
+    local bufnr = api.nvim_create_buf(false, true)
+    api.nvim_buf_set_option(bufnr, "modifiable", false)
+    api.nvim_buf_set_option(bufnr, "buftype", "nofile")
 
-    local winid = vim.api.nvim_open_win(bufnr, false, opts)
+    local winid = api.nvim_open_win(bufnr, focus or false, opts)
 
     -- Set window highlights
-    vim.api.nvim_set_hl(0, "FloatBorder", {fg = "#89b4fa", bg = "#1e1e2e"})
-    vim.api.nvim_set_hl(0, "FloatTitle", {fg = "#89b4fa", bg = "#1e1e2e"})
-    vim.api.nvim_set_hl(0, "NormalFloat", {bg = "#ffffff"})
+    if not M._float_highlights_set then
+        api.nvim_set_hl(0, "FloatBorder", {fg = "#89b4fa", bg = "#1e1e2e"})
+        api.nvim_set_hl(0, "FloatTitle", {fg = "#89b4fa", bg = "#1e1e2e"})
+        api.nvim_set_hl(0, "NormalFloat", {bg = "#ffffff"})
+        M._float_highlights_set = true
+    end
 
-    vim.api.nvim_win_set_option(winid, "winhl", "Normal:NormalFloat,FloatBorder:FloatBorder,FloatTitle:FloatTitle")
+    local winhl = "Normal:NormalFloat,FloatBorder:FloatBorder,FloatTitle:FloatTitle"
+    if focus then
+        winhl = winhl .. ",Cursor:NormalFloat,lCursor:NormalFloat,CursorLine:NormalFloat,CursorLineNr:NormalFloat"
+    end
+    api.nvim_win_set_option(winid, "winhl", winhl)
 
     -- Return window info including position for image placement
     return winid, bufnr, row, col, float_width, float_height
@@ -150,11 +190,7 @@ local function clear_image(image_id)
         q = 2 -- Quiet mode
     }
 
-    local control_str = ""
-    for k, v in pairs(control) do
-        control_str = control_str .. k .. "=" .. v .. ","
-    end
-    control_str = control_str:sub(1, -2)
+    local control_str = build_control_string(control)
 
     local cmd = string.format("\x1b_G%s\x1b\\", control_str)
     write(tmux_wrap(cmd))
@@ -163,104 +199,60 @@ end
 -- Clear all images and close float window
 local function cleanup_image()
     clear_image(1)
-    if M.current_winid and vim.api.nvim_win_is_valid(M.current_winid) then
-        vim.api.nvim_win_close(M.current_winid, true)
+    if M.current_winid and api.nvim_win_is_valid(M.current_winid) then
+        api.nvim_win_close(M.current_winid, true)
     end
     M.current_winid = nil
     M.current_image_data = nil
     M.current_image_width = nil
     M.current_image_height = nil
     M.current_float_pos = nil
+    M.manager_winid = nil
+    M.manager_bufid = nil
+    M.manager_active = false
+    if M.manager_guicursor then
+        vim.o.guicursor = M.manager_guicursor
+        M.manager_guicursor = nil
+    end
 end
 
--- Redraw image at stored position (for focus restore)
-local function redraw_image()
-    if not M.current_image_data or not M.current_float_pos then
-        return
+local function push_history(entry)
+    if #M.history >= MAX_HISTORY then
+        table.remove(M.history, 1)
     end
-
-    local pos = M.current_float_pos
-    local x, y = get_image_position(pos.row, pos.col, pos.width, pos.height, M.current_image_width, M.current_image_height)
-
-    local control = {
-        a = "T", f = 100, t = "d", q = 2, i = 1, C = 1,
-        w = M.current_image_width, h = M.current_image_height
-    }
-
-    local control_str = ""
-    for k, v in pairs(control) do
-        control_str = control_str .. k .. "=" .. v .. ","
-    end
-    control_str = control_str:sub(1, -2)
-
-    local chunks = get_chunked(M.current_image_data)
-
-    write("\x1b[s")
-    write(string.format("\x1b[%d;%dH", y, x))
-
-    for i = 1, #chunks do
-        local chunk_control = control_str
-        chunk_control = chunk_control .. ",m=" .. (i < #chunks and "1" or "0")
-        local cmd = string.format("\x1b_G%s;%s\x1b\\", chunk_control, chunks[i])
-        write(tmux_wrap(cmd))
-        control_str = "m=" .. (i == #chunks - 1 and "0" or "1")
-        vim.loop.sleep(1)
-    end
-
-    write("\x1b[u")
+    table.insert(M.history, entry)
+    M.history_index = #M.history
 end
-
--- Setup global autocmds for VimLeave (run once at module load)
-local function setup_global_autocmds()
-    local group = vim.api.nvim_create_augroup("ImageGlobal", {clear = true})
-
-    -- Clear image when quitting Neovim
-    vim.api.nvim_create_autocmd("VimLeavePre", {
-        group = group,
-        callback = function()
-            clear_image(1)
-        end
-    })
-
-    -- Handle tmux window switching - clear on focus lost
-    vim.api.nvim_create_autocmd("FocusLost", {
-        group = group,
-        callback = function()
-            clear_image(1)
-        end
-    })
-
-    -- Restore image on focus gained
-    vim.api.nvim_create_autocmd("FocusGained", {
-        group = group,
-        callback = function()
-            if M.current_winid and vim.api.nvim_win_is_valid(M.current_winid) then
-                vim.defer_fn(function()
-                    redraw_image()
-                end, 50)
-            end
-        end
-    })
-end
-setup_global_autocmds()
 
 local function setup_cursor_autocmd()
-    local group = vim.api.nvim_create_augroup("ImageClear", {clear = true})
-    vim.api.nvim_create_autocmd(
+    local group = api.nvim_create_augroup("ImageClear", {clear = true})
+    api.nvim_create_autocmd(
         {"CursorMoved", "CursorMovedI"},
         {
             group = group,
             callback = function()
                 cleanup_image()
-                vim.api.nvim_del_augroup_by_name("ImageClear")
+                api.nvim_del_augroup_by_name("ImageClear")
             end,
             once = true
         }
     )
 end
 
--- Main function to display image
-function M.show_image(base64_data, width, height)
+local function set_manager_keymaps(bufnr)
+    local opts = {noremap = true, silent = true, nowait = true, buffer = bufnr}
+    vim.keymap.set("n", "h", function()
+        M.show_previous_image(true)
+    end, opts)
+    vim.keymap.set("n", "l", function()
+        M.show_next_image(true)
+    end, opts)
+    vim.keymap.set("n", "q", function()
+        cleanup_image()
+    end, opts)
+end
+
+local function display_image(base64_data, width, height, record_history, focus, auto_clear)
     if not stdout then
         vim.notify("Pyrola: Image display disabled (no TTY available).", vim.log.levels.WARN)
         return
@@ -273,11 +265,16 @@ function M.show_image(base64_data, width, height)
     width = tonumber(width or 300)
     height = tonumber(height or 300)
 
-    if M.current_winid and vim.api.nvim_win_is_valid(M.current_winid) then
-        vim.api.nvim_win_close(M.current_winid, true)
+    if record_history then
+        push_history({data = base64_data, width = width, height = height})
     end
 
-    local winid, _, float_row, float_col, float_width, float_height = create_image_float(width, height)
+    if M.current_winid and api.nvim_win_is_valid(M.current_winid) then
+        api.nvim_win_close(M.current_winid, true)
+    end
+
+    local winid, bufnr, float_row, float_col, float_width, float_height =
+        create_image_float(width, height, focus)
     M.current_winid = winid
 
     -- Store image state for focus restore
@@ -300,34 +297,84 @@ function M.show_image(base64_data, width, height)
         h = height -- Image height
     }
 
-    local control_str = ""
-    for k, v in pairs(control) do
-        control_str = control_str .. k .. "=" .. v .. ","
-    end
-    control_str = control_str:sub(1, -2)
-
+    local control_str = build_control_string(control)
     local chunks = get_chunked(base64_data)
-
-    write("\x1b[s")
-    write(string.format("\x1b[%d;%dH", y, x))
-
-    for i = 1, #chunks do
-        local chunk_control = control_str
-        if i < #chunks then
-            chunk_control = chunk_control .. ",m=1"
-        else
-            chunk_control = chunk_control .. ",m=0"
+    send_image_chunks(control_str, chunks, x, y)
+    if focus then
+        M.manager_winid = winid
+        M.manager_bufid = bufnr
+        M.manager_active = true
+        set_manager_keymaps(bufnr)
+        if not M.manager_guicursor then
+            M.manager_guicursor = vim.o.guicursor
+            vim.o.guicursor = "a:ver1-Cursor"
         end
+    else
+        M.manager_winid = nil
+        M.manager_bufid = nil
+        M.manager_active = false
+    end
+    if auto_clear then
+        setup_cursor_autocmd()
+    end
+end
 
-        local cmd = string.format("\x1b_G%s;%s\x1b\\", chunk_control, chunks[i])
-        write(tmux_wrap(cmd))
-
-        control_str = "m=" .. (i == #chunks - 1 and "0" or "1")
-        vim.loop.sleep(1)
+-- Redraw image at stored position (for focus restore)
+local function redraw_image()
+    if not M.current_image_data or not M.current_float_pos then
+        return
     end
 
-    write("\x1b[u")
-    setup_cursor_autocmd()
+    local pos = M.current_float_pos
+    local x, y = get_image_position(pos.row, pos.col, pos.width, pos.height, M.current_image_width, M.current_image_height)
+
+    local control = {
+        a = "T", f = 100, t = "d", q = 2, i = 1, C = 1,
+        w = M.current_image_width, h = M.current_image_height
+    }
+
+    local control_str = build_control_string(control)
+    local chunks = get_chunked(M.current_image_data)
+    send_image_chunks(control_str, chunks, x, y)
+end
+
+-- Setup global autocmds for VimLeave (run once at module load)
+local function setup_global_autocmds()
+    local group = api.nvim_create_augroup("ImageGlobal", {clear = true})
+
+    -- Clear image when quitting Neovim
+    api.nvim_create_autocmd("VimLeavePre", {
+        group = group,
+        callback = function()
+            clear_image(1)
+        end
+    })
+
+    -- Handle tmux window switching - clear on focus lost
+    api.nvim_create_autocmd("FocusLost", {
+        group = group,
+        callback = function()
+            clear_image(1)
+        end
+    })
+
+    -- Restore image on focus gained
+    api.nvim_create_autocmd("FocusGained", {
+        group = group,
+        callback = function()
+            if M.current_winid and api.nvim_win_is_valid(M.current_winid) then
+                vim.defer_fn(function()
+                    redraw_image()
+                end, 50)
+            end
+        end
+    })
+end
+setup_global_autocmds()
+
+-- Main function to display image
+function M.show_image(base64_data, width, height)
+    display_image(base64_data, width, height, true, false, true)
 end
 
 function M.show_image_file(path, width, height)
@@ -340,7 +387,58 @@ function M.show_image_file(path, width, height)
         vim.notify("Pyrola: Image file empty or unreadable.", vim.log.levels.WARN)
         return
     end
-    M.show_image(content, width, height)
+    display_image(content, width, height, true, false, true)
+end
+
+local function show_history_at(index, focus)
+    if #M.history == 0 then
+        vim.notify("Pyrola: No image history available.", vim.log.levels.WARN)
+        return
+    end
+    if index < 1 or index > #M.history then
+        return
+    end
+    local entry = M.history[index]
+    M.history_index = index
+    display_image(entry.data, entry.width, entry.height, false, focus, not focus)
+end
+
+function M.open_history_manager()
+    if #M.history == 0 then
+        vim.notify("Pyrola: No image history available.", vim.log.levels.WARN)
+        return
+    end
+    show_history_at(#M.history, true)
+end
+
+function M.show_last_image()
+    show_history_at(#M.history, false)
+end
+
+function M.show_previous_image(focus)
+    if #M.history == 0 then
+        vim.notify("Pyrola: No image history available.", vim.log.levels.WARN)
+        return
+    end
+    if M.history_index <= 1 then
+        M.history_index = 1
+        vim.notify("Pyrola: Already at oldest image.", vim.log.levels.INFO)
+        return
+    end
+    show_history_at(M.history_index - 1, focus or M.manager_active)
+end
+
+function M.show_next_image(focus)
+    if #M.history == 0 then
+        vim.notify("Pyrola: No image history available.", vim.log.levels.WARN)
+        return
+    end
+    if M.history_index >= #M.history then
+        M.history_index = #M.history
+        vim.notify("Pyrola: Already at newest image.", vim.log.levels.INFO)
+        return
+    end
+    show_history_at(M.history_index + 1, focus or M.manager_active)
 end
 
 return M

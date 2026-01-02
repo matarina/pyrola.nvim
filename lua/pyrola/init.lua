@@ -1,4 +1,4 @@
-local api, ts = vim.api, vim.treesitter
+local api, fn, ts = vim.api, vim.fn, vim.treesitter
 
 local M = {
     config = {
@@ -9,6 +9,8 @@ local M = {
         },
         split_horizen = false,
         split_ratio = 0.65,
+        send_buffer_key = "<leader>vb",
+        image_manager_key = "<leader>im",
         image = {
             tmux_focus_events = true,
             tmux_pane_poll = true,
@@ -20,19 +22,39 @@ local M = {
         winid = 0,
         bufid = 0,
         chanid = 0
-    }
+    },
+    send_queue = {},
+    send_flushing = false,
+    repl_ready = false
 }
+
+local function repl_ready()
+    return M.term.opened == 1 and M.term.chanid ~= 0 and M.connection_file_path
+end
+
+local function get_plugin_path()
+    if M.plugin_path then
+        return M.plugin_path
+    end
+    local runtime_paths = api.nvim_list_runtime_paths()
+    for _, path in ipairs(runtime_paths) do
+        if path:match("pyrola.nvim$") then
+            M.plugin_path = path
+            return path
+        end
+    end
+end
 
 local function register_kernel_cleanup()
     if M.kernel_cleanup_set then
         return
     end
-    vim.api.nvim_create_autocmd(
+    api.nvim_create_autocmd(
         "VimLeavePre",
         {
             callback = function()
                 if M.filetype and M.connection_file_path then
-                    vim.fn.ShutdownKernel(M.filetype, M.connection_file_path)
+                    fn.ShutdownKernel(M.filetype, M.connection_file_path)
                     os.remove(M.connection_file_path)
                 end
             end,
@@ -43,7 +65,7 @@ local function register_kernel_cleanup()
 end
 
 local function init_kernel(kernelname)
-    local success, result = pcall(vim.fn.InitKernel, kernelname)
+    local success, result = pcall(fn.InitKernel, kernelname)
     if not success then
         if string.find(result, "Unknown function") then
             vim.notify(
@@ -72,7 +94,7 @@ end
 
 local function open_terminal()
     M.filetype = vim.bo.filetype
-    local origin_win = vim.api.nvim_get_current_win()
+    local origin_win = api.nvim_get_current_win()
     local kernelname = M.config.kernel_map[M.filetype]
     if not kernelname then
         vim.notify(
@@ -91,7 +113,7 @@ local function open_terminal()
         register_kernel_cleanup()
     end
 
-    local bufid = vim.api.nvim_create_buf(false, true)
+    local bufid = api.nvim_create_buf(false, true)
 
     if M.config.split_horizen then
         local height = math.floor(vim.o.lines * M.config.split_ratio)
@@ -105,26 +127,13 @@ local function open_terminal()
 
     vim.opt.termguicolors = true
 
-    vim.api.nvim_win_set_buf(0, bufid)
-    local winid = vim.api.nvim_get_current_win()
+    api.nvim_win_set_buf(0, bufid)
+    local winid = api.nvim_get_current_win()
 
     vim.wo.winfixheight = true
 
     local statusline_format = string.format("Kernel: %s  |  Line : %%l ", kernelname)
-    vim.api.nvim_win_set_option(winid, "statusline", statusline_format)
-
-    local function get_plugin_path()
-        if M.plugin_path then
-            return M.plugin_path
-        end
-        local runtime_paths = vim.api.nvim_list_runtime_paths()
-        for _, path in ipairs(runtime_paths) do
-            if path:match("pyrola.nvim$") then
-                M.plugin_path = path
-                return path
-            end
-        end
-    end
+    api.nvim_win_set_option(winid, "statusline", statusline_format)
 
     local console_path = get_plugin_path()
 
@@ -141,7 +150,7 @@ local function open_terminal()
 
         -- Open terminal with environment and options
         local chanid =
-            vim.fn.termopen(
+            fn.termopen(
             term_cmd,
             {
                 on_exit = function()
@@ -155,23 +164,20 @@ local function open_terminal()
             bufid = bufid,
             chanid = chanid
         }
-        if vim.api.nvim_win_is_valid(origin_win) then
-            vim.api.nvim_set_current_win(origin_win)
+        M.repl_ready = false
+        if api.nvim_win_is_valid(origin_win) then
+            api.nvim_set_current_win(origin_win)
         end
     else
-        vim.api.nvim_err_writeln("Failed to initialize kernel")
+        api.nvim_err_writeln("Failed to initialize kernel")
     end
 end
 
-local function send_message(message)
-    local function repl_active()
-        return M.term.opened == 1 and M.term.chanid ~= 0 and M.connection_file_path
-    end
-
+local function raw_send_message(message)
     local function normalize_python_message(msg)
         local lines = vim.split(msg, "\n", {plain = true})
         if #lines <= 1 then
-            return msg, false
+            return msg
         end
 
         local function ends_with_colon(line)
@@ -215,7 +221,7 @@ local function send_message(message)
 
         if in_top_block then
             local last = out[#out] or ""
-            if last:match("^%s*$") == nil then
+            if not last:match("^%s*$") then
                 table.insert(out, "")
             end
         end
@@ -224,7 +230,10 @@ local function send_message(message)
         return normalized
     end
 
-    if not repl_active() then
+    if not repl_ready() then
+        return
+    end
+    if not message or message == "" then
         return
     end
 
@@ -238,59 +247,95 @@ local function send_message(message)
         api.nvim_chan_send(M.term.chanid, prefix .. message .. suffix .. "\n")
     end
 
-    if vim.api.nvim_win_is_valid(M.term.winid) then
-        vim.api.nvim_win_set_cursor(
+    if api.nvim_win_is_valid(M.term.winid) then
+        api.nvim_win_set_cursor(
             M.term.winid,
-            {vim.api.nvim_buf_line_count(vim.api.nvim_win_get_buf(M.term.winid)), 0}
+            {api.nvim_buf_line_count(api.nvim_win_get_buf(M.term.winid)), 0}
         )
     end
 end
 
-local function move_cursor_to_next_line(end_row)
-    -- Get the line at end_row
-    local line = vim.api.nvim_buf_get_lines(0, end_row - 1, end_row, false)[1]
-    local filetype = vim.bo.filetype
-
-    local target_line
-    if filetype == "cpp" then
-        -- Special handling for C++
-        local is_preprocessor = line:match("^%s*#")
-        target_line = end_row + (is_preprocessor and 1 or 2)
-    else
-        -- For other languages, always move 2 lines
-        target_line = end_row + 2
+local function flush_send_queue()
+    if M.send_flushing then
+        return
     end
+    if not M.repl_ready then
+        return
+    end
+    if #M.send_queue == 0 then
+        return
+    end
+    M.send_flushing = true
+    local next_message = table.remove(M.send_queue, 1)
+    M.repl_ready = false
+    raw_send_message(next_message)
+    M.send_flushing = false
+end
 
-    if target_line <= vim.api.nvim_buf_line_count(0) then
-        vim.api.nvim_win_set_cursor(0, {target_line, 0})
+local function send_message(message)
+    if not repl_ready() then
+        return
+    end
+    if not message or message == "" then
+        return
+    end
+    table.insert(M.send_queue, message)
+    flush_send_queue()
+end
+
+function M._on_repl_ready()
+    M.repl_ready = true
+    flush_send_queue()
+end
+
+local function move_cursor_to_next_line(end_row)
+    local comment_char = vim.bo.filetype == "cpp" and "//" or "#"
+    local line_count = api.nvim_buf_line_count(0)
+    local row = end_row + 2
+
+    while row <= line_count do
+        local line = api.nvim_buf_get_lines(0, row - 1, row, false)[1] or ""
+        local col = line:find("%S")
+        if col and line:sub(col, col + (#comment_char - 1)) ~= comment_char then
+            api.nvim_win_set_cursor(0, {row, 0})
+            return
+        end
+        row = row + 1
     end
 end
 
 local function get_visual_selection()
-    local start_pos, end_pos = vim.fn.getpos("v"), vim.fn.getcurpos()
+    local start_pos, end_pos = fn.getpos("v"), fn.getcurpos()
     local start_line, end_line = start_pos[2], end_pos[2]
     if start_line > end_line then
         start_line, end_line = end_line, start_line
     end
-    local lines = vim.api.nvim_buf_get_lines(0, start_line - 1, end_line, false)
+    local lines = api.nvim_buf_get_lines(0, start_line - 1, end_line, false)
     return table.concat(lines, "\n"), end_line
 end
 
 local function create_pretty_float(content)
     local content_lines = vim.split(content, "\n", {plain = true})
-    local win_width = vim.api.nvim_get_option("columns")
-    local win_height = vim.api.nvim_get_option("lines")
+    local win_width = api.nvim_get_option("columns")
+    local win_height = api.nvim_get_option("lines")
 
     local max_content_width = 0
     for _, line in ipairs(content_lines) do
-        max_content_width = math.max(max_content_width, vim.fn.strdisplaywidth(line))
+        max_content_width = math.max(max_content_width, fn.strdisplaywidth(line))
     end
 
-    local width = math.min(max_content_width + 2, math.floor(win_width * 0.8))
-    local height = math.min(#content_lines, math.floor(win_height * 0.8))
+    local max_width = math.max(10, math.floor(win_width * 0.9))
+    local max_height = math.max(6, math.floor(win_height * 0.9))
+    local min_width = math.min(20, max_width)
+    local min_height = math.min(4, max_height)
 
-    local row = math.floor((win_height - height) / 2)
-    local col = math.floor((win_width - width) / 2)
+    local width = math.min(max_content_width + 4, max_width)
+    local height = math.min(#content_lines + 2, max_height)
+    width = math.max(width, min_width)
+    height = math.max(height, min_height)
+
+    local row = math.max(0, math.floor((win_height - height) / 2))
+    local col = math.max(0, math.floor((win_width - width) / 2))
 
     local opts = {
         relative = "editor",
@@ -300,30 +345,30 @@ local function create_pretty_float(content)
         col = col,
         style = "minimal",
         border = "rounded",
-        title = " Output ",
+        title = " Inspector ",
         title_pos = "center"
     }
 
-    local bufnr = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, content_lines)
+    local bufnr = api.nvim_create_buf(false, true)
+    api.nvim_buf_set_lines(bufnr, 0, -1, false, content_lines)
 
-    vim.api.nvim_buf_set_option(bufnr, "modifiable", false)
-    vim.api.nvim_buf_set_option(bufnr, "buftype", "nofile")
+    api.nvim_buf_set_option(bufnr, "modifiable", false)
+    api.nvim_buf_set_option(bufnr, "buftype", "nofile")
 
-    local winid = vim.api.nvim_open_win(bufnr, true, opts)
+    local winid = api.nvim_open_win(bufnr, true, opts)
 
-    vim.api.nvim_set_hl(0, "FloatBorder", {fg = "#89b4fa", bg = "#1e1e2e"})
-    vim.api.nvim_set_hl(0, "FloatTitle", {fg = "#89b4fa", bg = "#1e1e2e"})
-    vim.api.nvim_set_hl(0, "NormalFloat", {bg = "#1e1e2e"})
+    api.nvim_set_hl(0, "FloatBorder", {fg = "#89b4fa", bg = "#1e1e2e"})
+    api.nvim_set_hl(0, "FloatTitle", {fg = "#89b4fa", bg = "#1e1e2e"})
+    api.nvim_set_hl(0, "NormalFloat", {bg = "#1e1e2e"})
 
-    vim.api.nvim_win_set_option(winid, "winhl", "Normal:NormalFloat,FloatBorder:FloatBorder,FloatTitle:FloatTitle")
+    api.nvim_win_set_option(winid, "winhl", "Normal:NormalFloat,FloatBorder:FloatBorder,FloatTitle:FloatTitle")
 
     local keymap_opts = {noremap = true, silent = true, buffer = bufnr}
     vim.keymap.set(
         "n",
         "q",
         function()
-            vim.api.nvim_win_close(winid, true)
+            api.nvim_win_close(winid, true)
         end,
         keymap_opts
     )
@@ -331,7 +376,7 @@ local function create_pretty_float(content)
         "n",
         "<Esc>",
         function()
-            vim.api.nvim_win_close(winid, true)
+            api.nvim_win_close(winid, true)
         end,
         keymap_opts
     )
@@ -343,7 +388,7 @@ local function create_pretty_float(content)
     vim.keymap.set("n", "<C-f>", "<C-f>zz", keymap_opts)
     vim.keymap.set("n", "<C-b>", "<C-b>zz", keymap_opts)
 
-    vim.api.nvim_set_current_win(winid)
+    api.nvim_set_current_win(winid)
 
     return winid, bufnr
 end
@@ -351,7 +396,7 @@ end
 local function check_and_install_dependencies()
     local python_executable = vim.g.python3_host_prog or "python3"
 
-    if vim.fn.executable(python_executable) == 0 then
+    if fn.executable(python_executable) == 0 then
         return
     end
 
@@ -361,25 +406,25 @@ local function check_and_install_dependencies()
         "import pynvim, jupyter_client, prompt_toolkit, PIL, pygments"
     }
 
-    vim.fn.system(check_cmd)
+    fn.system(check_cmd)
 
     if vim.v.shell_error ~= 0 then
-        local pip_path = vim.fn.system(python_executable .. " -m pip --version"):gsub("\n", "")
-        local install_path = vim.fn.system(python_executable .. " -c \"import site; print(site.USER_SITE)\""):gsub("\n", "")
+        local pip_path = fn.system(python_executable .. " -m pip --version"):gsub("\n", "")
+        local install_path = fn.system(python_executable .. " -c \"import site; print(site.USER_SITE)\""):gsub("\n", "")
 
-        local choice = vim.fn.confirm(
+        local choice = fn.confirm(
             string.format("Pyrola: Missing packages. Install?\n\nPython: %s\nPip: %s\nInstall path: %s",
                 python_executable, pip_path, install_path),
             "&Yes\n&No",
             1
         )
         if choice == 1 then
-            local bufnr = vim.api.nvim_create_buf(false, true)
-            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {"Installing dependencies..."})
+            local bufnr = api.nvim_create_buf(false, true)
+            api.nvim_buf_set_lines(bufnr, 0, -1, false, {"Installing dependencies..."})
 
             local width = math.floor(vim.o.columns * 0.6)
             local height = math.floor(vim.o.lines * 0.4)
-            local winid = vim.api.nvim_open_win(bufnr, false, {
+            local winid = api.nvim_open_win(bufnr, false, {
                 relative = "editor",
                 width = width,
                 height = height,
@@ -393,7 +438,7 @@ local function check_and_install_dependencies()
 
             local error_lines = {}
 
-            vim.fn.jobstart({
+            fn.jobstart({
                 python_executable, "-m", "pip", "install", "--user",
                 "pynvim", "jupyter-client", "prompt-toolkit", "pillow", "pygments"
             }, {
@@ -402,30 +447,30 @@ local function check_and_install_dependencies()
                 on_stdout = function(_, data)
                     if data then
                         vim.schedule(function()
-                            for _, line in ipairs(data) do
-                                if line ~= "" then
-                                    vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, {line})
-                                end
+                                    for _, line in ipairs(data) do
+                                        if line ~= "" then
+                                            api.nvim_buf_set_lines(bufnr, -1, -1, false, {line})
+                                        end
+                                    end
+                                end)
                             end
-                        end)
-                    end
                 end,
                 on_stderr = function(_, data)
                     if data then
                         vim.schedule(function()
-                            for _, line in ipairs(data) do
-                                if line ~= "" then
-                                    table.insert(error_lines, line)
-                                    vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, {line})
-                                end
+                                    for _, line in ipairs(data) do
+                                        if line ~= "" then
+                                            table.insert(error_lines, line)
+                                            api.nvim_buf_set_lines(bufnr, -1, -1, false, {line})
+                                        end
+                                    end
+                                end)
                             end
-                        end)
-                    end
                 end,
                 on_exit = function(_, return_val)
                     vim.schedule(function()
-                        if vim.api.nvim_win_is_valid(winid) then
-                            vim.api.nvim_win_close(winid, true)
+                        if api.nvim_win_is_valid(winid) then
+                            api.nvim_win_close(winid, true)
                         end
                         if return_val == 0 then
                             vim.cmd("UpdateRemotePlugins")
@@ -446,7 +491,7 @@ function M.setup(opts)
     vim.schedule(check_and_install_dependencies)
     M.config = vim.tbl_deep_extend("force", M.config, opts or {})
     if not M.commands_set then
-        vim.api.nvim_create_user_command("Pyrola", function(cmd)
+        api.nvim_create_user_command("Pyrola", function(cmd)
             if cmd.args == "init" then
                 M.init()
                 return
@@ -454,6 +499,21 @@ function M.setup(opts)
             vim.notify("Pyrola: Unknown command. Try :Pyrola init", vim.log.levels.WARN)
         end, {nargs = 1})
         M.commands_set = true
+    end
+    if not M.keymaps_set then
+        local key = M.config.send_buffer_key
+        if key and key ~= "" then
+            vim.keymap.set("n", key, function()
+                M.send_buffer_to_repl()
+            end, {noremap = true, silent = true, desc = "Pyrola send buffer"})
+        end
+        local image_key = M.config.image_manager_key
+        if image_key and image_key ~= "" then
+            vim.keymap.set("n", image_key, function()
+                require("pyrola.image").open_history_manager()
+            end, {noremap = true, silent = true, desc = "Pyrola image manager"})
+        end
+        M.keymaps_set = true
     end
     return M
 end
@@ -463,14 +523,14 @@ function M.init()
 end
 
 function M.inspect()
-    if M.term.opened == 0 or M.term.chanid == 0 or not M.connection_file_path then
+    if not repl_ready() then
         return
     end
 
     M.filetype = vim.bo.filetype
     local obj
-    if vim.treesitter.get_node then
-        local ok_node, node = pcall(vim.treesitter.get_node)
+    if ts.get_node then
+        local ok_node, node = pcall(ts.get_node)
         if ok_node and node then
             local ok_text, text = pcall(ts.get_node_text, node, 0)
             if ok_text and text and text ~= "" then
@@ -479,12 +539,12 @@ function M.inspect()
         end
     end
     if not obj then
-        local ok_parser, parser = pcall(vim.treesitter.get_parser, 0)
+        local ok_parser, parser = pcall(ts.get_parser, 0)
         if ok_parser and parser then
             local tree = parser:parse()[1]
             if tree then
                 local root = tree:root()
-                local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+                local row, col = unpack(api.nvim_win_get_cursor(0))
                 row = row - 1
                 local node = root:named_descendant_for_range(row, col, row, col)
                 if node and node ~= root then
@@ -497,14 +557,14 @@ function M.inspect()
         end
     end
     if not obj or obj == "" then
-        obj = vim.fn.expand("<cword>")
+        obj = fn.expand("<cword>")
     end
     if not obj or obj == "" then
         vim.notify("Pyrola: No symbol found under cursor to inspect.", vim.log.levels.WARN)
         return
     end
 
-    local ok, result = pcall(vim.fn.ExecuteKernelCode, M.filetype, M.connection_file_path, obj)
+    local ok, result = pcall(fn.ExecuteKernelCode, M.filetype, M.connection_file_path, obj)
     if not ok then
         vim.notify(string.format("Pyrola: Inspect failed: %s", result), vim.log.levels.ERROR)
         return
@@ -514,15 +574,35 @@ function M.inspect()
 end
 
 function M.send_visual_to_repl()
-    if M.term.opened == 0 or M.term.chanid == 0 or not M.connection_file_path then
+    if not repl_ready() then
         return
     end
-    local current_winid = vim.api.nvim_get_current_win()
+    local current_winid = api.nvim_get_current_win()
     local msg, end_row = get_visual_selection()
     send_message(msg)
-    vim.api.nvim_set_current_win(current_winid)
+    api.nvim_set_current_win(current_winid)
     move_cursor_to_next_line(end_row)
-    vim.api.nvim_feedkeys(api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
+    api.nvim_feedkeys(api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
+end
+
+function M.send_buffer_to_repl()
+    if not repl_ready() then
+        return
+    end
+    M.filetype = vim.bo.filetype
+    local current_winid = api.nvim_get_current_win()
+    local lines = api.nvim_buf_get_lines(0, 0, -1, false)
+    if not lines or #lines == 0 then
+        return
+    end
+    local msg = table.concat(lines, "\n")
+    if msg == "" then
+        return
+    end
+    send_message(msg)
+    if api.nvim_win_is_valid(current_winid) then
+        api.nvim_set_current_win(current_winid)
+    end
 end
 
 local function handle_cursor_move()
@@ -535,12 +615,9 @@ local function handle_cursor_move()
         -- Skip empty lines or comment lines
         if not col or line:sub(col, col + (#comment_char - 1)) == comment_char then
             row = row + 1
-            local success, err =
-                pcall(
-                function()
-                    api.nvim_win_set_cursor(0, {row, 0})
-                end
-            )
+            pcall(function()
+                api.nvim_win_set_cursor(0, {row, 0})
+            end)
         else
             local cursor_pos = api.nvim_win_get_cursor(0)
             local current_col = cursor_pos[2] + 1
@@ -583,8 +660,8 @@ local function handle_cursor_move()
 end
 
 function M.send_statement_definition()
-    if M.term.opened == 0 or M.term.chanid == 0 or not M.connection_file_path then
-        vim.api.nvim_feedkeys(
+    if not repl_ready() then
+        api.nvim_feedkeys(
             api.nvim_replace_termcodes("<CR>", true, false, true),
             "n",
             false
@@ -592,7 +669,7 @@ function M.send_statement_definition()
         return
     end
     handle_cursor_move()
-    local ok_parser, parser = pcall(vim.treesitter.get_parser, 0)
+    local ok_parser, parser = pcall(ts.get_parser, 0)
     if not ok_parser or not parser then
         vim.notify("Pyrola: Tree-sitter parser not available for this buffer.", vim.log.levels.WARN)
         return
@@ -604,9 +681,9 @@ function M.send_statement_definition()
     end
     local root = tree:root()
     local function node_at_cursor()
-        local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+        local row, col = unpack(api.nvim_win_get_cursor(0))
         row = row - 1
-        local line = vim.api.nvim_buf_get_lines(0, row, row + 1, false)[1] or ""
+        local line = api.nvim_buf_get_lines(0, row, row + 1, false)[1] or ""
         local max_col = math.max(#line - 1, 0)
         if col > max_col then
             col = max_col
@@ -625,7 +702,7 @@ function M.send_statement_definition()
     end
     local node = node_at_cursor()
 
-    local current_winid = vim.api.nvim_get_current_win()
+    local current_winid = api.nvim_get_current_win()
 
     local function find_and_return_node()
         local function immediate_child(node)
@@ -650,7 +727,7 @@ function M.send_statement_definition()
         return
     end
 
-    local ok, msg = pcall(vim.treesitter.get_node_text, node, 0)
+    local ok, msg = pcall(ts.get_node_text, node, 0)
 
     if not ok then
         print("Error getting node text!")
@@ -661,7 +738,7 @@ function M.send_statement_definition()
     if msg then
         send_message(msg)
     end
-    vim.api.nvim_set_current_win(winid)
+    api.nvim_set_current_win(winid)
     move_cursor_to_next_line(end_row)
 end
 
