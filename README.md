@@ -22,15 +22,29 @@ https://youtu.be/ugyOw3Hop08
 
 ## Installation
 
-### Prerequisites
+### 1) Python + Jupyter prerequisites
 
-To harness the full potential of `pyrola`, you must first install the following essential Python packages:
+Pyrola talks to Jupyter kernels through Neovim's Python provider. Install the core Python deps first:
 
 ```bash
-pip install pynvim jupyter-client prompt-toolkit pillow pygments
+python3 -m pip install --user pynvim jupyter-client prompt-toolkit pillow pygments
 ```
-For image viewer, high quality image preview are based kitty graphic protocol,a  rough pixelized resolution image in console can be available for all terminal.
-In addition, you will need to install [timg](https://github.com/hzeller/timg), a terminal-based image viewer. For users on Debian-based systems, the installation can be accomplished with the following command:
+
+Then install a Jupyter kernel for each language you want to use. For Python:
+
+```bash
+python3 -m pip install --user ipykernel
+python3 -m ipykernel install --user --name python3
+```
+
+For other languages, install their Jupyter kernels and use the kernel name in `kernel_map`:
+
+- R: `IRkernel::installspec()` (from R)
+- C++: `xeus-cling` (kernel name varies by install)
+
+### 2) Image preview helper (recommended)
+
+Pyrola can render images inside the REPL. It uses [timg](https://github.com/hzeller/timg) for terminal previews. On Debian/Ubuntu:
 
 ```bash
 apt install timg
@@ -38,7 +52,9 @@ apt install timg
 
 Note for tmux: image hide/show on pane or window switches relies on focus events. Pyrola will try to enable tmux focus events for the current session. To configure it yourself, add `set -g focus-events on` to `~/.tmux.conf`, or disable the auto toggle with `image = { tmux_focus_events = false }` in `pyrola.setup`. If focus events are unreliable in your setup, enable the polling fallback with `image = { tmux_pane_poll = true, tmux_pane_poll_interval = 500 }`. For more precise square floats, tune the cell size mapping with `image = { cell_width = 10, cell_height = 20 }`, or allow tmux auto-detection (default) and disable it with `image = { tmux_cell_size = false }`.
 
-Subsequently, you can install `pyrola` using `lazy.nvim` by incorporating the following configuration into your Neovim setup:
+### 3) Install the plugin (lazy.nvim)
+
+Add Pyrola to your plugin manager and run `:UpdateRemotePlugins` once after install (or keep the build step below):
 
 ```lua
   {
@@ -55,7 +71,8 @@ Subsequently, you can install `pyrola` using `lazy.nvim` by incorporating the fo
             },
             split_horizen = false,
             split_ratio = 0.3,
-            send_buffer_key = "<leader>vb"
+            send_buffer_key = "<leader>vb",
+            image_manager_key = "<leader>im"
         })
 
         -- Key mappings
@@ -63,11 +80,6 @@ Subsequently, you can install `pyrola` using `lazy.nvim` by incorporating the fo
         vim.keymap.set("v", '<leader>vs', function() require('pyrola').send_visual_to_repl() end, { noremap = true})
         vim.keymap.set("n", "<leader>vb", function() pyrola.send_buffer_to_repl() end, { noremap = true })
         vim.keymap.set("n", "<leader>is", function() pyrola.inspect() end, { noremap = true })
-
-        -- Image history keybindings
-        vim.keymap.set("n", "<leader>i", function() pyrola.show_last_image() end, { noremap = true, desc = "Show last image" })
-        vim.keymap.set("n", "<leader>h", function() pyrola.show_previous_image() end, { noremap = true, desc = "Previous image" })
-        vim.keymap.set("n", "<leader>l", function() pyrola.show_next_image() end, { noremap = true, desc = "Next image" })
     end,
   },
 
@@ -90,17 +102,40 @@ Subsequently, you can install `pyrola` using `lazy.nvim` by incorporating the fo
   }
 ```
 
+Note: `send_buffer_key` and `image_manager_key` create default mappings during setup. If you keep those defaults, you can omit the manual mappings for those actions.
+
 ## Usage
 
-`pyrola` operates on the principle of communication between the Jupyter kernel and the client, allowing for a versatile programming experience across various languages. To initiate a Python REPL environment with `pyrola`, you must install the Python Jupyter kernel, such as `ipykernel`. For your specific programming language and kernel, it is crucial to explicitly define it in the `kernel_map` options, for instance, `{ kernel_map = { python = "python3" } }`. The index corresponds to your filetype, which can be verified using the command: `echo &filetype`. The values represent your kernel names.
+### Start a REPL
 
-You can also customize the terminal split direction and size through the options `split_horizen` and `split_ratio`. For semantic code parsing and dispatching to the terminal, the Treesitter language parser is essential. Ensure that the parser is installed in your Treesitter Lua configuration if you prefer not to specify it explicitly in the `pyrola` Lua configuration.
+1. Open a file with a filetype that exists in `kernel_map` (check with `:echo &filetype`).
+2. Run `:Pyrola init` to start the kernel and open the REPL split.
 
-For sending larger code blocks, visual selection is available, allowing you to bind keys to transmit code selected in visual mode to the terminal. To inspect variables, you can bind keys to `pyrola.inspect()`, triggering it when the cursor hovers over the variables you wish to examine. This feature currently supports Python and R, with aspirations to expand support for additional languages in the future. Contributions to enhance variable inspection for your preferred languages are warmly welcomed!
+If you change kernel names or add languages, update `kernel_map` in `pyrola.setup`.
+
+### Send code
+
+- Current statement/block: `pyrola.send_statement_definition()`
+- Visual selection: `pyrola.send_visual_to_repl()`
+- Whole buffer: `pyrola.send_buffer_to_repl()`
+
+Treesitter improves block detection for `send_statement_definition()`. Install the parser for your language if block selection feels off.
+
+### Inspect variables
+
+Use `pyrola.inspect()` while your cursor is on a symbol. This currently supports Python and R (easy to extend).
+
+### Image history manager
+
+Press `<leader>im` (default) to open the image manager float. When the manager is focused:
+
+- `h`: previous image
+- `l`: next image
+- `q`: close the window
 
 ### Key Bindings
 
-Below are the recommended key bindings to optimize your experience with `pyrola`:
+Below are recommended key bindings. Adjust to taste:
 
 ```lua
 -- nvim_ds_repl plugin configuration --
@@ -125,6 +160,11 @@ vim.api.nvim_create_autocmd({"BufEnter", "BufWinEnter"}, {
         -- Query information about the specific object under the cursor
         vim.keymap.set("n", '<leader>is', function()
             require('pyrola').inspect()
+        end, { noremap = true })
+
+        -- Open image history manager
+        vim.keymap.set("n", '<leader>im', function()
+            require('pyrola.image').open_history_manager()
         end, { noremap = true })
     end
 })
