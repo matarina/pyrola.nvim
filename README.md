@@ -36,6 +36,8 @@ In addition, you will need to install [timg](https://github.com/hzeller/timg), a
 apt install timg
 ```
 
+Note for tmux: image hide/show on pane or window switches relies on focus events. Pyrola will try to enable tmux focus events for the current session. To configure it yourself, add `set -g focus-events on` to `~/.tmux.conf`, or disable the auto toggle with `image = { tmux_focus_events = false }` in `pyrola.setup`. If focus events are unreliable in your setup, enable the polling fallback with `image = { tmux_pane_poll = true, tmux_pane_poll_interval = 500 }`. For more precise square floats, tune the cell size mapping with `image = { cell_width = 10, cell_height = 20 }`, or allow tmux auto-detection (default) and disable it with `image = { tmux_cell_size = false }`.
+
 Subsequently, you can install `pyrola` using `lazy.nvim` by incorporating the following configuration into your Neovim setup:
 
 ```lua
@@ -120,4 +122,3 @@ vim.api.nvim_create_autocmd({"BufEnter", "BufWinEnter"}, {
 ## Contributing
 
 Contributions are  welcome ! `pyrola` is in its nascent stages and is actively maintained. Any reported issues will receive prompt attention. For enhanced image rendering capabilities, terminal graphic protocols such as Kitty or Sixel are not yet supported within the Neovim terminal buffer, as discussed in [this issue](https://github.com/neovim/neovim/issues/30889). Stay tuned for future developments and improvements!
-

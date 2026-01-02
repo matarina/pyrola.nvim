@@ -6,6 +6,13 @@ if not stdout then
     error("failed to open stdout")
 end
 
+-- Track current image state for focus handling
+M.current_winid = nil
+M.current_image_data = nil
+M.current_image_width = nil
+M.current_image_height = nil
+M.current_float_pos = nil
+
 -- Enable tmux passthrough if needed
 local function enable_tmux_passthrough()
     if os.getenv("TMUX") then
@@ -62,8 +69,9 @@ local function create_image_float(image_width, image_height)
     local width_cells = pixels_to_cells(image_width, true)
     local height_cells = pixels_to_cells(image_height, false)
 
-    local float_width = width_cells + 3
-    local float_height = height_cells + 3
+    -- Add padding for border (1 cell each side) + small margin
+    local float_width = width_cells + 2
+    local float_height = height_cells + 2
 
     -- Calculate center position
     local row = math.floor((win_height - float_height) / 2)
@@ -73,8 +81,8 @@ local function create_image_float(image_width, image_height)
         relative = "editor",
         width = float_width,
         height = float_height,
-        row = row - 1,
-        col = col - 2,
+        row = row,
+        col = col,
         style = "minimal",
         border = "rounded",
         title = " Image View ",
@@ -94,21 +102,30 @@ local function create_image_float(image_width, image_height)
 
     vim.api.nvim_win_set_option(winid, "winhl", "Normal:NormalFloat,FloatBorder:FloatBorder,FloatTitle:FloatTitle")
 
-    return winid, bufnr
+    -- Return window info including position for image placement
+    return winid, bufnr, row, col, float_width, float_height
 end
 
--- Calculate center position
-local function get_center_position(width, height)
-    local term_width = vim.api.nvim_get_option("columns")
-    local term_height = vim.api.nvim_get_option("lines")
+-- Calculate image position centered within float window
+-- float_row/col are 0-indexed from editor top-left
+-- Add 1 for border, then center image within content area
+local function get_image_position(float_row, float_col, float_width, float_height, image_width, image_height)
+    local width_cells = pixels_to_cells(image_width, true)
+    local height_cells = pixels_to_cells(image_height, false)
 
-    local width_cells = pixels_to_cells(width, true)
-    local height_cells = pixels_to_cells(height, false)
+    -- Content area is inside border (subtract 2 for borders)
+    local content_width = float_width - 2
+    local content_height = float_height - 2
 
-    local x = math.floor((term_width - width_cells) / 2)
-    local y = math.floor((term_height - height_cells) / 2)
+    -- Center image within content area
+    local x_offset = math.floor((content_width - width_cells) / 2)
+    local y_offset = math.floor((content_height - height_cells) / 2)
 
-    return math.max(x, 0), math.max(y, 0)
+    -- Position: float position + border (1) + title row (1) + centering offset
+    local x = float_col + 5 + x_offset
+    local y = float_row + 5 + y_offset
+
+    return math.max(x, 1), math.max(y, 1)
 end
 
 -- Helper function to clear images
@@ -130,6 +147,90 @@ local function clear_image(image_id)
     write(tmux_wrap(cmd))
 end
 
+-- Clear all images and close float window
+local function cleanup_image()
+    clear_image(1)
+    if M.current_winid and vim.api.nvim_win_is_valid(M.current_winid) then
+        vim.api.nvim_win_close(M.current_winid, true)
+    end
+    M.current_winid = nil
+    M.current_image_data = nil
+    M.current_image_width = nil
+    M.current_image_height = nil
+    M.current_float_pos = nil
+end
+
+-- Redraw image at stored position (for focus restore)
+local function redraw_image()
+    if not M.current_image_data or not M.current_float_pos then
+        return
+    end
+
+    local pos = M.current_float_pos
+    local x, y = get_image_position(pos.row, pos.col, pos.width, pos.height, M.current_image_width, M.current_image_height)
+
+    local control = {
+        a = "T", f = 100, t = "d", q = 2, i = 1, C = 1,
+        w = M.current_image_width, h = M.current_image_height
+    }
+
+    local control_str = ""
+    for k, v in pairs(control) do
+        control_str = control_str .. k .. "=" .. v .. ","
+    end
+    control_str = control_str:sub(1, -2)
+
+    local chunks = get_chunked(M.current_image_data)
+
+    write("\x1b[s")
+    write(string.format("\x1b[%d;%dH", y, x))
+
+    for i = 1, #chunks do
+        local chunk_control = control_str
+        chunk_control = chunk_control .. ",m=" .. (i < #chunks and "1" or "0")
+        local cmd = string.format("\x1b_G%s;%s\x1b\\", chunk_control, chunks[i])
+        write(tmux_wrap(cmd))
+        control_str = "m=" .. (i == #chunks - 1 and "0" or "1")
+        vim.loop.sleep(1)
+    end
+
+    write("\x1b[u")
+end
+
+-- Setup global autocmds for VimLeave (run once at module load)
+local function setup_global_autocmds()
+    local group = vim.api.nvim_create_augroup("ImageGlobal", {clear = true})
+
+    -- Clear image when quitting Neovim
+    vim.api.nvim_create_autocmd("VimLeavePre", {
+        group = group,
+        callback = function()
+            clear_image(1)
+        end
+    })
+
+    -- Handle tmux window switching - clear on focus lost
+    vim.api.nvim_create_autocmd("FocusLost", {
+        group = group,
+        callback = function()
+            clear_image(1)
+        end
+    })
+
+    -- Restore image on focus gained
+    vim.api.nvim_create_autocmd("FocusGained", {
+        group = group,
+        callback = function()
+            if M.current_winid and vim.api.nvim_win_is_valid(M.current_winid) then
+                vim.defer_fn(function()
+                    redraw_image()
+                end, 50)
+            end
+        end
+    })
+end
+setup_global_autocmds()
+
 local function setup_cursor_autocmd()
     local group = vim.api.nvim_create_augroup("ImageClear", {clear = true})
     vim.api.nvim_create_autocmd(
@@ -137,11 +238,7 @@ local function setup_cursor_autocmd()
         {
             group = group,
             callback = function()
-                clear_image(1)
-                if M.current_winid and vim.api.nvim_win_is_valid(M.current_winid) then
-                    vim.api.nvim_win_close(M.current_winid, true)
-                    M.current_winid = nil
-                end
+                cleanup_image()
                 vim.api.nvim_del_augroup_by_name("ImageClear")
             end,
             once = true
@@ -161,9 +258,18 @@ function M.show_image(base64_data, width, height)
     if M.current_winid and vim.api.nvim_win_is_valid(M.current_winid) then
         vim.api.nvim_win_close(M.current_winid, true)
     end
-    M.current_winid = create_image_float(width, height)
 
-    local x, y = get_center_position(width, height)
+    local winid, _, float_row, float_col, float_width, float_height = create_image_float(width, height)
+    M.current_winid = winid
+
+    -- Store image state for focus restore
+    M.current_image_data = base64_data
+    M.current_image_width = width
+    M.current_image_height = height
+    M.current_float_pos = {row = float_row, col = float_col, width = float_width, height = float_height}
+
+    -- Calculate position centered within the float window
+    local x, y = get_image_position(float_row, float_col, float_width, float_height, width, height)
 
     local control = {
         a = "T", -- Transmit and display

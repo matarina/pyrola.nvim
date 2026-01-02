@@ -8,7 +8,12 @@ local M = {
             cpp = "xcpp17"
         },
         split_horizen = false,
-        split_ratio = 0.65
+        split_ratio = 0.65,
+        image = {
+            tmux_focus_events = true,
+            tmux_pane_poll = true,
+            tmux_pane_poll_interval = 500
+        }
     },
     term = {
         opened = 0,
@@ -46,7 +51,13 @@ local function open_terminal()
 
     local success, result = pcall(vim.fn.InitKernel, kernelname)
     if not success then
-        if string.find(result, "No such kernel") then
+        if string.find(result, "Unknown function") then
+            vim.notify(
+                "Pyrola: Remote plugin not loaded. Run :UpdateRemotePlugins and restart Neovim.",
+                vim.log.levels.ERROR
+            )
+            return
+        elseif string.find(result, "No such kernel") then
             vim.notify(
                 string.format(
                     "Pyrola: Kernel '%s' not found. Please install it manually (see README) and update setup config.",
@@ -147,12 +158,20 @@ local function send_message(message)
 
     if M.term.opened == 0 then
         open_terminal()
+        if M.term.chanid == 0 then
+            vim.notify("Pyrola: Failed to open terminal", vim.log.levels.ERROR)
+            return
+        end
         local timer = vim.loop.new_timer()
         timer:start(
             1000,
             0,
             vim.schedule_wrap(
                 function()
+                    if M.term.chanid == 0 then
+                        timer:close()
+                        return
+                    end
                     local prefix = api.nvim_replace_termcodes("<esc>[200~", true, false, true)
                     local suffix = api.nvim_replace_termcodes("<esc>[201~", true, false, true)
 
@@ -177,6 +196,10 @@ local function send_message(message)
             )
         )
     else
+        if M.term.chanid == 0 then
+            vim.notify("Pyrola: Terminal channel is invalid", vim.log.levels.ERROR)
+            return
+        end
         local prefix = api.nvim_replace_termcodes("<esc>[200~", true, false, true)
         local suffix = api.nvim_replace_termcodes("<esc>[201~", true, false, true)
 
@@ -324,23 +347,78 @@ local function check_and_install_dependencies()
     vim.fn.system(check_cmd)
 
     if vim.v.shell_error ~= 0 then
+        local pip_path = vim.fn.system(python_executable .. " -m pip --version"):gsub("\n", "")
+        local install_path = vim.fn.system(python_executable .. " -c \"import site; print(site.USER_SITE)\""):gsub("\n", "")
+
         local choice = vim.fn.confirm(
-            "Pyrola: Required python packages are missing. Install them?",
+            string.format("Pyrola: Missing packages. Install?\n\nPython: %s\nPip: %s\nInstall path: %s",
+                python_executable, pip_path, install_path),
             "&Yes\n&No",
             1
         )
         if choice == 1 then
-            vim.notify("Pyrola: Installing dependencies...", vim.log.levels.INFO)
+            local bufnr = vim.api.nvim_create_buf(false, true)
+            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {"Installing dependencies..."})
+
+            local width = math.floor(vim.o.columns * 0.6)
+            local height = math.floor(vim.o.lines * 0.4)
+            local winid = vim.api.nvim_open_win(bufnr, false, {
+                relative = "editor",
+                width = width,
+                height = height,
+                row = math.floor((vim.o.lines - height) / 2),
+                col = math.floor((vim.o.columns - width) / 2),
+                style = "minimal",
+                border = "rounded",
+                title = " Installing Dependencies ",
+                title_pos = "center"
+            })
+
+            local error_lines = {}
+
             vim.fn.jobstart({
-                python_executable, "-m", "pip", "install",
+                python_executable, "-m", "pip", "install", "--user",
                 "pynvim", "jupyter-client", "prompt-toolkit", "pillow", "pygments"
             }, {
-                on_exit = function(_, return_val)
-                    if return_val == 0 then
-                        vim.notify("Pyrola: Dependencies installed successfully. Please restart Neovim.", vim.log.levels.INFO)
-                    else
-                        vim.notify("Pyrola: Failed to install dependencies.", vim.log.levels.ERROR)
+                stdout_buffered = false,
+                stderr_buffered = false,
+                on_stdout = function(_, data)
+                    if data then
+                        vim.schedule(function()
+                            for _, line in ipairs(data) do
+                                if line ~= "" then
+                                    vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, {line})
+                                end
+                            end
+                        end)
                     end
+                end,
+                on_stderr = function(_, data)
+                    if data then
+                        vim.schedule(function()
+                            for _, line in ipairs(data) do
+                                if line ~= "" then
+                                    table.insert(error_lines, line)
+                                    vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, {line})
+                                end
+                            end
+                        end)
+                    end
+                end,
+                on_exit = function(_, return_val)
+                    vim.schedule(function()
+                        if vim.api.nvim_win_is_valid(winid) then
+                            vim.api.nvim_win_close(winid, true)
+                        end
+                        if return_val == 0 then
+                            vim.cmd("UpdateRemotePlugins")
+                            vim.notify("Pyrola: Dependencies installed and remote plugins updated. Please restart Neovim.", vim.log.levels.INFO)
+                        else
+                            vim.notify(string.format(
+                                "Pyrola: Failed to install dependencies (exit code: %d)\nPython: %s\nCheck output above for details.",
+                                return_val, python_executable), vim.log.levels.ERROR)
+                        end
+                    end)
                 end
             })
         end
@@ -430,8 +508,33 @@ end
 function M.send_statement_definition()
     handle_cursor_move()
     local parser = assert(vim.treesitter.get_parser(0))
-    local root = parser:parse()[1]:root()
-    local node = vim.treesitter.get_node()
+    local tree = parser:parse()[1]
+    if not tree then
+        print("No valid node found!")
+        return
+    end
+    local root = tree:root()
+    local function node_at_cursor()
+        local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+        row = row - 1
+        local line = vim.api.nvim_buf_get_lines(0, row, row + 1, false)[1] or ""
+        local max_col = math.max(#line - 1, 0)
+        if col > max_col then
+            col = max_col
+        end
+        local node = root:named_descendant_for_range(row, col, row, col)
+        if node == root then
+            node = nil
+        end
+        if not node and #line > 0 then
+            node = root:named_descendant_for_range(row, 0, row, max_col)
+            if node == root then
+                node = nil
+            end
+        end
+        return node
+    end
+    local node = node_at_cursor()
 
     local current_winid = vim.api.nvim_get_current_win()
 
@@ -473,8 +576,18 @@ function M.send_statement_definition()
     move_cursor_to_next_line(end_row)
 end
 
+-- Image history functions
+function M.show_last_image()
+    require("pyrola.image").show_last_image()
+end
+
+function M.show_previous_image()
+    require("pyrola.image").show_previous_image()
+end
+
+function M.show_next_image()
+    require("pyrola.image").show_next_image()
+end
+
 return M
-
-
-
 
