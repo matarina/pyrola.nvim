@@ -41,42 +41,51 @@ Note for tmux: image hide/show on pane or window switches relies on focus events
 Subsequently, you can install `pyrola` using `lazy.nvim` by incorporating the following configuration into your Neovim setup:
 
 ```lua
-return {
+  {
     "matarina/pyrola.nvim",
     dependencies = { "nvim-treesitter/nvim-treesitter" },
     build = ":UpdateRemotePlugins",
-    config = function(_, opts)
+    config = function()
         local pyrola = require("pyrola")
         pyrola.setup({
-            kernel_map = { -- Map Jupyter kernel names to Neovim filetypes
+            kernel_map = {
                 python = "python3",
                 r = "ir",
                 cpp = "xcpp14"
             },
-            split_horizen = false, -- Define the terminal split direction
-            split_ratio = 0.3 -- Set the terminal split size
+            split_horizen = false,
+            split_ratio = 0.3
         })
 
-        -- Define key mappings for enhanced functionality
-        vim.keymap.set("n", "<Enter>", function()
-            pyrola.send_statement_definition()
-        end, { noremap = true })
+        -- Key mappings
+        vim.keymap.set("n", "<Enter>", function() pyrola.send_statement_definition() end, { noremap = true })
+        vim.keymap.set("v", '<leader>vs', function() require('pyrola').send_visual_to_repl() end, { noremap = true})
+        vim.keymap.set("n", "<leader>is", function() pyrola.inspect() end, { noremap = true })
 
-        vim.keymap.set("v", '<leader>vs', function()
-            require('pyrola').send_visual_to_repl()
-        end, { noremap = true })
-
-        vim.keymap.set("n", "<leader>is", function()
-            pyrola.inspect()
-        end, { noremap = true })
-
-        -- Configure Treesitter for enhanced code parsing
-        require("nvim-treesitter.configs").setup({
-            ensure_installed = { "cpp", "r", "python" }, -- Ensure the necessary Treesitter language parsers are installed
-            auto_install = true
-        })
+        -- Image history keybindings
+        vim.keymap.set("n", "<leader>i", function() pyrola.show_last_image() end, { noremap = true, desc = "Show last image" })
+        vim.keymap.set("n", "<leader>h", function() pyrola.show_previous_image() end, { noremap = true, desc = "Previous image" })
+        vim.keymap.set("n", "<leader>l", function() pyrola.show_next_image() end, { noremap = true, desc = "Next image" })
     end,
-}
+  },
+
+  -- SEPARATE Treesitter Configuration
+  {
+    "nvim-treesitter/nvim-treesitter",
+    build = ":TSUpdate",
+    config = function()
+        -- NOTE: The module name is now 'nvim-treesitter' (not .configs or .config)
+        local ts = require("nvim-treesitter")
+
+        ts.setup({
+            -- In the new version, 'install_dir' is often required or defaults to site
+            install_dir = vim.fn.stdpath('data') .. '/site'
+        })
+
+        -- NEW WAY to install parsers via Lua
+        ts.install({  "r", "python", "lua", "vim", "vimdoc" })
+    end
+  }
 ```
 
 ## Usage
