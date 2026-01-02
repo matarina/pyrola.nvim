@@ -3,7 +3,7 @@ local M = {}
 -- Create TTY output handle
 local stdout = vim.loop.new_tty(1, false)
 if not stdout then
-    error("failed to open stdout")
+    stdout = nil
 end
 
 -- Track current image state for focus handling
@@ -15,7 +15,7 @@ M.current_float_pos = nil
 
 -- Enable tmux passthrough if needed
 local function enable_tmux_passthrough()
-    if os.getenv("TMUX") then
+    if stdout and os.getenv("TMUX") then
         local enable_seq = '\027Ptmux;\027\027]52;c;1\007\027\\'
         stdout:write(enable_seq)
     end
@@ -24,6 +24,9 @@ enable_tmux_passthrough()
 
 -- Helper function to chunk large data
 local function get_chunked(str)
+    if type(str) ~= "string" then
+        return {}
+    end
     local chunks = {}
     for i = 1, #str, 4096 do
         local chunk = str:sub(i, i + 4096 - 1):gsub("%s", "")
@@ -36,10 +39,20 @@ end
 
 -- Helper function to write to terminal
 local function write(data)
-    if data == "" then
+    if not stdout or data == "" then
         return
     end
     stdout:write(data)
+end
+
+local function read_file(path)
+    local file = io.open(path, "rb")
+    if not file then
+        return nil
+    end
+    local content = file:read("*a")
+    file:close()
+    return content
 end
 
 local function tmux_wrap(cmd)
@@ -248,8 +261,13 @@ end
 
 -- Main function to display image
 function M.show_image(base64_data, width, height)
-    if not base64_data then
-        error("Base64 image data is required")
+    if not stdout then
+        vim.notify("Pyrola: Image display disabled (no TTY available).", vim.log.levels.WARN)
+        return
+    end
+    if type(base64_data) ~= "string" or base64_data == "" then
+        vim.notify("Pyrola: Image data missing or invalid.", vim.log.levels.WARN)
+        return
     end
 
     width = tonumber(width or 300)
@@ -312,5 +330,17 @@ function M.show_image(base64_data, width, height)
     setup_cursor_autocmd()
 end
 
-return M
+function M.show_image_file(path, width, height)
+    if type(path) ~= "string" or path == "" then
+        vim.notify("Pyrola: Image path missing or invalid.", vim.log.levels.WARN)
+        return
+    end
+    local content = read_file(path)
+    if not content or content == "" then
+        vim.notify("Pyrola: Image file empty or unreadable.", vim.log.levels.WARN)
+        return
+    end
+    M.show_image(content, width, height)
+end
 
+return M

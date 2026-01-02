@@ -43,6 +43,8 @@ class ReplInterpreter:
         self.in_multiline = False
         self.multiline_buffer = []
         self._interrupt_requested = False
+        self._image_debug = os.environ.get("PYROLA_IMAGE_DEBUG", "0") == "1"
+        self._auto_indent = os.environ.get("PYROLA_AUTO_INDENT", "0") == "1"
 
         # Setup prompt toolkit
         self.history = InMemoryHistory()
@@ -109,6 +111,10 @@ class ReplInterpreter:
             message=lambda: HTML("<orange>>> </orange>"),
             include_default_pygments_style=False,
         )
+        try:
+            self.session.default_buffer.auto_indent = self._auto_indent
+        except Exception:
+            pass
 
         self._setup_signal_handlers()
 
@@ -128,6 +134,9 @@ class ReplInterpreter:
             print("No kernel connection file specified", file=sys.stderr)
             sys.exit(1)
 
+    def _vim_escape_string(self, value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
     def _create_keybindings(self):
         kb = KeyBindings()
 
@@ -145,7 +154,7 @@ class ReplInterpreter:
                 if status == "incomplete":
                     self.in_multiline = True
                     event.current_buffer.newline()
-                    if indent:
+                    if indent and self._auto_indent:
                         event.current_buffer.insert_text(indent)
                 else:
                     event.current_buffer.validate_and_handle()
@@ -381,14 +390,41 @@ class ReplInterpreter:
                         new_width = orig_width
                         new_height = orig_height
                         img_base64 = data
-
-                    self.nvim.command('let g:pyrola_image_data = "%s"' % img_base64)
-                    self.nvim.command('let g:pyrola_image_width = "%s"' % new_width)
-                    self.nvim.command('let g:pyrola_image_height= "%s"' % new_height)
-                    self.nvim.command(
-                        'lua require("pyrola.image").show_image(vim.g.pyrola_image_data, vim.g.pyrola_image_width, vim.g.pyrola_image_height)'
-                    )
-                    self.nvim.command("unlet g:pyrola_image_data")
+                    import tempfile
+                    tmp_path = None
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".b64", delete=False
+                        ) as tmp:
+                            tmp.write(img_base64.encode("utf-8"))
+                            tmp_path = tmp.name
+                        if self._image_debug:
+                            print(
+                                f"[pyrola] wrote image b64 temp: {tmp_path} bytes={len(img_base64)}",
+                                file=sys.stderr,
+                            )
+                        escaped_path = self._vim_escape_string(tmp_path)
+                        self.nvim.command(
+                            f'let g:pyrola_image_path = "{escaped_path}"'
+                        )
+                        self.nvim.command(
+                            f"let g:pyrola_image_width = {int(new_width)}"
+                        )
+                        self.nvim.command(
+                            f"let g:pyrola_image_height = {int(new_height)}"
+                        )
+                        self.nvim.command(
+                            'lua require("pyrola.image").show_image_file(vim.g.pyrola_image_path, vim.g.pyrola_image_width, vim.g.pyrola_image_height)'
+                        )
+                        self.nvim.command("unlet g:pyrola_image_path")
+                        self.nvim.command("unlet g:pyrola_image_width")
+                        self.nvim.command("unlet g:pyrola_image_height")
+                    finally:
+                        if tmp_path:
+                            try:
+                                os.unlink(tmp_path)
+                            except Exception:
+                                pass
                 except Exception as e:
                     print(f"Error in Neovim thread: {e}", file=sys.stderr)
             except Exception as e:
@@ -408,6 +444,26 @@ class ReplInterpreter:
             "image/jpeg": "jpeg",
             "image/svg+xml": "svg",
         }
+        def _extract_image_data(value):
+            if isinstance(value, str):
+                return value
+            if isinstance(value, (bytes, bytearray)):
+                try:
+                    return bytes(value).decode("utf-8")
+                except Exception:
+                    return ""
+            if isinstance(value, (list, tuple)):
+                if not value:
+                    return ""
+                if all(isinstance(x, str) for x in value):
+                    return "".join(value)
+                if all(isinstance(x, (bytes, bytearray)) for x in value):
+                    try:
+                        return b"".join(value).decode("utf-8")
+                    except Exception:
+                        return ""
+                return _extract_image_data(value[0])
+            return ""
 
         while self.client.iopub_channel.msg_ready():
             msg = self.client.get_iopub_msg()
@@ -452,48 +508,56 @@ class ReplInterpreter:
                     print(content)
                     sys.stdout.flush()
 
-                # Handle image data
-                for mime in _imagemime:
-                    if mime in data:
-                        if isinstance(data[mime], str):
-                            image_data = data[mime]
-                        else:
-                            image_data = str(data[mime][0]) if data[mime] else ''
+                # Handle image data (prefer PNG for Neovim display)
+                image_mime = None
+                for candidate in ("image/png", "image/jpeg", "image/svg+xml"):
+                    if candidate in data:
+                        image_mime = candidate
+                        break
 
-                        import tempfile
-                        import subprocess
+                if image_mime:
+                    image_data = _extract_image_data(data.get(image_mime))
+                    if not image_data:
+                        continue
+                    if self._image_debug:
+                        print(
+                            f"[pyrola] image mime={image_mime} b64len={len(image_data)}",
+                            file=sys.stderr,
+                        )
+
+                    import tempfile
+                    import subprocess
+
+                    try:
+                        ext = _imagemime[image_mime]
+                        with tempfile.NamedTemporaryFile(
+                            suffix=f".{ext}", delete=False
+                        ) as tmp:
+                            if image_mime == "image/svg+xml":
+                                tmp.write(image_data.encode("utf-8"))
+                            else:
+                                img_bytes = base64.b64decode(image_data)
+                                tmp.write(img_bytes)
+                            tmp_path = tmp.name
 
                         try:
-                            ext = _imagemime[mime]
-                            with tempfile.NamedTemporaryFile(
-                                suffix=f".{ext}", delete=False
-                            ) as tmp:
-                                if mime == "image/svg+xml":
-                                    tmp.write(image_data.encode("utf-8"))
-                                else:
-                                    img_bytes = base64.b64decode(image_data)
-                                    tmp.write(img_bytes)
-                                tmp_path = tmp.name
+                            subprocess.run(["timg", "-p", "q", tmp_path], check=True)
+                            if (
+                                image_mime == "image/png"
+                                and self.nvim
+                                and self.nvim_thread
+                                and self.nvim_thread.is_alive()
+                            ):
+                                self.nvim_queue.put(image_data)
+                        except (
+                            subprocess.CalledProcessError,
+                            FileNotFoundError,
+                        ) as e:
+                            print(f"Failed to display image: {e}")
 
-                            try:
-                                subprocess.run(
-                                    ["timg", "-p", "q", tmp_path], check=True
-                                )
-                                if (
-                                    self.nvim
-                                    and self.nvim_thread
-                                    and self.nvim_thread.is_alive()
-                                ):
-                                    self.nvim_queue.put(image_data)
-                            except (
-                                subprocess.CalledProcessError,
-                                FileNotFoundError,
-                            ) as e:
-                                print(f"Failed to display image: {e}")
-
-                            os.unlink(tmp_path)
-                        except Exception as e:
-                            print(f"Error handling image: {e}")
+                        os.unlink(tmp_path)
+                    except Exception as e:
+                        print(f"Error handling image: {e}")
 
 
             elif msg_type == "error":
@@ -526,6 +590,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-

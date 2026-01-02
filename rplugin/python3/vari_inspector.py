@@ -5,6 +5,21 @@ import inspect
 import types
 from collections import Counter, defaultdict
 
+try:
+    import pandas as pd
+except Exception:
+    pd = None
+
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+try:
+    import torch
+except Exception:
+    torch = None
+
 if 'python_Var_inspector' not in globals():
     class UniversalInspector:
         def __init__(self):
@@ -73,46 +88,88 @@ if 'python_Var_inspector' not in globals():
 
         def _inspect_pandas_dataframe(self, obj):
             # Get basic DataFrame info
+            max_rows = 20
+            max_cols = 10
+            df = obj
+            truncated = False
+
+            if df.shape[0] > max_rows:
+                df = df.head(max_rows)
+                truncated = True
+            if df.shape[1] > max_cols:
+                df = df.iloc[:, :max_cols]
+                truncated = True
+
             df_info = [
                 self._format_line("Type", "Pandas DataFrame"),
                 self._format_line("Shape", f"{obj.shape[0]} rows × {obj.shape[1]} columns"),
                 self._format_line("Memory", f"{obj.memory_usage(deep=True).sum()} bytes"),
                 self._format_line("Columns", list(obj.columns)),
                 self._format_line("dtypes", obj.dtypes.to_dict()),
-                "\\nData Content:"
             ]
+            if truncated:
+                df_info.append(
+                    self._format_line(
+                        "Preview",
+                        f"{df.shape[0]} rows × {df.shape[1]} columns"
+                    )
+                )
+            df_info.append("\\nData Content:")
             self._add_section(df_info)
 
             # Format the DataFrame as a plain text table
             def format_value(v):
-                if pd.isna(v):
-                    return "NaN"
-                elif isinstance(v, (int, float)):
-                    return f"{v:>8}"
-                else:
-                    return f"{str(v):>8}"
+                if pd is not None and pd.api.types.is_scalar(v):
+                    try:
+                        if pd.isna(v):
+                            return "NaN"
+                    except Exception:
+                        pass
+                return str(v)
+
+            def is_number(v):
+                if pd is not None:
+                    try:
+                        return pd.api.types.is_number(v) and not isinstance(v, bool)
+                    except Exception:
+                        return False
+                return isinstance(v, (int, float)) and not isinstance(v, bool)
 
             # Get string representations of all values
-            str_df = obj.astype(str)
+            str_df = df.applymap(format_value)
 
             # Get maximum width for each column (including header)
             col_widths = {}
-            for col in obj.columns:
+            for col in df.columns:
                 col_widths[col] = max(
                     len(str(col)),
-                    max(str_df[col].str.len().max(), 8)
+                    int(str_df[col].str.len().max() or 0)
                 ) + 2  # Add padding
 
+            index_name = df.index.name if df.index.name is not None else "index"
+            index_values = [str(idx) for idx in df.index]
+            index_width = max(len(str(index_name)), max((len(v) for v in index_values), default=0))
+
             # Create header
-            header = "".join(f"{str(col):>{col_widths[col]}}" for col in obj.columns)
-            separator = "".join("-" * width for width in col_widths.values())
+            header = f"{str(index_name):>{index_width}} " + "".join(
+                f"{str(col):>{col_widths[col]}}" for col in df.columns
+            )
+            separator = f"{'-' * index_width} " + "".join(
+                "-" * width for width in col_widths.values()
+            )
 
             # Create rows
             rows = []
-            for idx, row in obj.iterrows():
-                row_str = "".join(f"{format_value(val):>{col_widths[col]}}"
-                                 for col, val in row.items())
-                rows.append(f"{idx:>3} {row_str}")
+            for row_idx, (idx, row) in enumerate(zip(index_values, df.itertuples(index=False, name=None))):
+                row_str = []
+                for col_idx, value in enumerate(row):
+                    col = df.columns[col_idx]
+                    cell = str_df.iat[row_idx, col_idx]
+                    if is_number(value):
+                        row_str.append(cell.rjust(col_widths[col]))
+                    else:
+                        row_str.append(cell.ljust(col_widths[col]))
+                rows.append(f"{idx:>{index_width}} " + "".join(row_str))
 
             # Combine all parts
             table = [
@@ -217,16 +274,15 @@ if 'python_Var_inspector' not in globals():
                 self._inspect_class_or_instance(obj)
             elif inspect.isfunction(obj) or inspect.ismethod(obj):
                 self._inspect_function(obj)
-            elif "pandas" in sys.modules and isinstance(obj, pd.Series):
+            elif pd is not None and isinstance(obj, pd.Series):
                 self._inspect_pandas_series(obj)
-            elif "pandas" in sys.modules and isinstance(obj, pd.Index):
+            elif pd is not None and isinstance(obj, pd.Index):
                 self._inspect_pandas_index(obj)
-            elif "numpy" in sys.modules and isinstance(obj, np.ndarray):
+            elif np is not None and isinstance(obj, np.ndarray):
                 self._inspect_numpy_array(obj)
-            elif "torch" in sys.modules and isinstance(obj, torch.Tensor):
+            elif torch is not None and isinstance(obj, torch.Tensor):
                 self._inspect_torch_tensor(obj)
-            elif "pandas" in sys.modules and isinstance(obj, pd.DataFrame):
-                print("pandas dataframe")
+            elif pd is not None and isinstance(obj, pd.DataFrame):
                 self._inspect_pandas_dataframe(obj)
             else:
                 self._inspect_basic_type(obj)
@@ -373,7 +429,6 @@ inspect <- function(obj) {
 cat(inspect(<<<VAR>>>))
 """
     return r_inspector.replace("<<<VAR>>>", str(input_var))
-
 
 
 
