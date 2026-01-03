@@ -488,6 +488,7 @@ local function check_and_install_dependencies()
 end
 
 function M.setup(opts)
+    vim.env.PYTHONDONTWRITEBYTECODE = "1"
     M.config = vim.tbl_deep_extend("force", M.config, opts or {})
     if not M.commands_set then
         api.nvim_create_user_command("Pyrola", function(cmd)
