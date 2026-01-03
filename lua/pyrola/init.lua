@@ -410,11 +410,19 @@ local function check_and_install_dependencies()
 
     if vim.v.shell_error ~= 0 then
         local pip_path = fn.system(python_executable .. " -m pip --version"):gsub("\n", "")
-        local install_path = fn.system(python_executable .. " -c \"import site; print(site.USER_SITE)\""):gsub("\n", "")
+        local install_path = fn.system(
+            python_executable
+                .. " -c \"import site, sys; "
+                .. "print(site.getsitepackages()[0] if hasattr(site, 'getsitepackages') and site.getsitepackages() else sys.prefix)\""
+        ):gsub("\n", "")
 
         local choice = fn.confirm(
-            string.format("Pyrola: Missing packages. Install?\n\nPython: %s\nPip: %s\nInstall path: %s",
-                python_executable, pip_path, install_path),
+            string.format(
+                "Pyrola: Missing packages. Install?\n\nPython: %s\nPip: %s\nInstall path: %s",
+                python_executable,
+                pip_path,
+                install_path
+            ),
             "&Yes\n&No",
             1
         )
@@ -438,10 +446,14 @@ local function check_and_install_dependencies()
 
             local error_lines = {}
 
-            fn.jobstart({
-                python_executable, "-m", "pip", "install",
-                "pynvim", "jupyter-client", "prompt-toolkit", "pillow", "pygments"
-            }, {
+            local pip_args = {python_executable, "-m", "pip", "install"}
+            table.insert(pip_args, "pynvim")
+            table.insert(pip_args, "jupyter-client")
+            table.insert(pip_args, "prompt-toolkit")
+            table.insert(pip_args, "pillow")
+            table.insert(pip_args, "pygments")
+
+            fn.jobstart(pip_args, {
                 stdout_buffered = false,
                 stderr_buffered = false,
                 on_stdout = function(_, data)
