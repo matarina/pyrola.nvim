@@ -28,6 +28,48 @@ local M = {
     repl_ready = false
 }
 
+local function is_vim_nil(value)
+    return vim.NIL ~= nil and value == vim.NIL
+end
+
+local function resolve_python_executable()
+    local host_prog = vim.g.python3_host_prog
+    if is_vim_nil(host_prog) then
+        host_prog = nil
+    end
+    if type(host_prog) == "string" and host_prog ~= "" then
+        return host_prog
+    end
+    return "python3"
+end
+
+local function validate_python_host()
+    local host_prog = vim.g.python3_host_prog
+    if is_vim_nil(host_prog) then
+        vim.notify(
+            "Pyrola: g:python3_host_prog is v:null. Unset it or set a valid python3 path.",
+            vim.log.levels.ERROR
+        )
+        return nil
+    end
+    if host_prog ~= nil and type(host_prog) ~= "string" then
+        vim.notify("Pyrola: g:python3_host_prog must be a string path to python3.", vim.log.levels.ERROR)
+        return nil
+    end
+    local python_executable = resolve_python_executable()
+    if fn.executable(python_executable) == 0 then
+        vim.notify(
+            string.format(
+                "Pyrola: python3 executable not found (%s). Set g:python3_host_prog to a valid python3 path.",
+                python_executable
+            ),
+            vim.log.levels.ERROR
+        )
+        return nil
+    end
+    return python_executable
+end
+
 local function repl_ready()
     return M.term.opened == 1 and M.term.chanid ~= 0 and M.connection_file_path
 end
@@ -92,7 +134,7 @@ local function init_kernel(kernelname)
     return result
 end
 
-local function open_terminal()
+local function open_terminal(python_executable)
     M.filetype = vim.bo.filetype
     local origin_win = api.nvim_get_current_win()
     local kernelname = M.config.kernel_map[M.filetype]
@@ -139,14 +181,16 @@ local function open_terminal()
 
     if M.connection_file_path then
         local nvim_socket = vim.v.servername
-        local term_cmd =
-            string.format(
-            "python3 %s/rplugin/python3/console.py --existing %s --filetype %s --nvim-socket %s",
-            console_path,
+        local term_cmd = {
+            python_executable,
+            string.format("%s/rplugin/python3/console.py", console_path),
+            "--existing",
             M.connection_file_path,
+            "--filetype",
             M.filetype,
+            "--nvim-socket",
             nvim_socket
-        )
+        }
 
         -- Open terminal with environment and options
         local chanid =
@@ -393,11 +437,11 @@ local function create_pretty_float(content)
     return winid, bufnr
 end
 
-local function check_and_install_dependencies()
-    local python_executable = vim.g.python3_host_prog or "python3"
+local function check_and_install_dependencies(python_executable)
+    python_executable = python_executable or resolve_python_executable()
 
     if fn.executable(python_executable) == 0 then
-        return
+        return false
     end
 
     local check_cmd = {
@@ -409,12 +453,13 @@ local function check_and_install_dependencies()
     fn.system(check_cmd)
 
     if vim.v.shell_error ~= 0 then
-        local pip_path = fn.system(python_executable .. " -m pip --version"):gsub("\n", "")
-        local install_path = fn.system(
-            python_executable
-                .. " -c \"import site, sys; "
-                .. "print(site.getsitepackages()[0] if hasattr(site, 'getsitepackages') and site.getsitepackages() else sys.prefix)\""
-        ):gsub("\n", "")
+        local pip_path = fn.system({python_executable, "-m", "pip", "--version"}):gsub("\n", "")
+        local install_path = fn.system({
+            python_executable,
+            "-c",
+            "import site, sys; "
+                .. "print(site.getsitepackages()[0] if hasattr(site, 'getsitepackages') and site.getsitepackages() else sys.prefix)"
+        }):gsub("\n", "")
 
         local choice = fn.confirm(
             string.format(
@@ -496,7 +541,9 @@ local function check_and_install_dependencies()
                 end
             })
         end
+        return false
     end
+    return true
 end
 
 local function check_timg_available()
@@ -544,7 +591,13 @@ function M.setup(opts)
 end
 
 function M.init()
-    check_and_install_dependencies()
+    local python_executable = validate_python_host()
+    if not python_executable then
+        return
+    end
+    if not check_and_install_dependencies(python_executable) then
+        return
+    end
     check_timg_available()
     local filetype = vim.bo.filetype
     local kernelname = M.config.kernel_map[filetype]
@@ -563,7 +616,7 @@ function M.init()
         M.connection_file_path = connection_file
         register_kernel_cleanup()
     end
-    open_terminal()
+    open_terminal(python_executable)
 end
 
 function M.inspect()
