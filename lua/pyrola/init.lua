@@ -499,6 +499,19 @@ local function check_and_install_dependencies()
     end
 end
 
+local function check_timg_available()
+    if M.timg_checked then
+        return
+    end
+    M.timg_checked = true
+    if fn.executable("timg") == 0 then
+        vim.notify(
+            "Pyrola: 'timg' not found. Image previews are disabled. Install 'timg' to enable image rendering.",
+            vim.log.levels.INFO
+        )
+    end
+end
+
 function M.setup(opts)
     vim.env.PYTHONDONTWRITEBYTECODE = "1"
     M.config = vim.tbl_deep_extend("force", M.config, opts or {})
@@ -532,6 +545,24 @@ end
 
 function M.init()
     check_and_install_dependencies()
+    check_timg_available()
+    local filetype = vim.bo.filetype
+    local kernelname = M.config.kernel_map[filetype]
+    if not kernelname then
+        vim.notify(
+            string.format("Pyrola: No kernel mapped for filetype '%s'. Update setup.kernel_map.", filetype),
+            vim.log.levels.WARN
+        )
+        return
+    end
+    if not M.connection_file_path then
+        local connection_file = init_kernel(kernelname)
+        if not connection_file then
+            return
+        end
+        M.connection_file_path = connection_file
+        register_kernel_cleanup()
+    end
     open_terminal()
 end
 
