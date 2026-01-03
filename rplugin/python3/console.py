@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 from queue import Empty, Queue
-from threading import Thread
+from threading import Lock, Thread
 from typing import List, Optional
 
 import pynvim
@@ -113,16 +113,11 @@ class ReplInterpreter:
         self.nvim = None
         self.nvim_queue = Queue()
         self.nvim_thread = None
+        self.nvim_lock = Lock()
+        self._nvim_address = os.environ.get("NVIM_LISTEN_ADDRESS")
 
-        try:
-            self.nvim = pynvim.attach(
-                "socket", path=os.environ.get("NVIM_LISTEN_ADDRESS")
-            )
-            # Start Neovim communication thread
-            self.nvim_thread = Thread(target=self._nvim_worker, daemon=True)
-            self.nvim_thread.start()
-        except Exception as e:
-            print(f"Failed to connect to Neovim: {e}", file=sys.stderr)
+        if self._nvim_address:
+            self._start_nvim_thread()
 
         self.style = Style.from_dict(
             {
@@ -184,6 +179,53 @@ class ReplInterpreter:
         else:
             print("No kernel connection file specified", file=sys.stderr)
             sys.exit(1)
+
+    def _attach_nvim(self, log_failure=False):
+        address = self._nvim_address or os.environ.get("NVIM_LISTEN_ADDRESS")
+        if not address:
+            self.nvim = None
+            return False
+        self._nvim_address = address
+        try:
+            self.nvim = pynvim.attach("socket", path=address)
+            return True
+        except Exception as e:
+            self.nvim = None
+            if log_failure:
+                print(f"Failed to connect to Neovim: {e}", file=sys.stderr)
+            return False
+
+    def _ensure_nvim(self):
+        if self.nvim:
+            return True
+        return self._attach_nvim(log_failure=self._image_debug)
+
+    def _is_nvim_disconnect_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (EOFError, BrokenPipeError, ConnectionResetError)):
+            return True
+        msg = str(exc).strip().lower()
+        if msg in ("eof", "socket closed", "connection closed"):
+            return True
+        return "broken pipe" in msg or "connection reset" in msg
+
+    def _handle_nvim_disconnect(self, exc: Exception, context: str) -> bool:
+        if not self._is_nvim_disconnect_error(exc):
+            return False
+        self.nvim = None
+        if self._image_debug:
+            print(
+                f"[pyrola] Neovim connection closed during {context}.",
+                file=sys.stderr,
+            )
+        return True
+
+    def _start_nvim_thread(self):
+        if not self._nvim_address:
+            return
+        if self.nvim_thread and self.nvim_thread.is_alive():
+            return
+        self.nvim_thread = Thread(target=self._nvim_worker, daemon=True)
+        self.nvim_thread.start()
 
     def _vim_escape_string(self, value: str) -> str:
         return value.replace("\\", "\\\\").replace('"', '\\"')
@@ -251,11 +293,9 @@ class ReplInterpreter:
 
         while True:
             try:
-                if self.nvim:
-                    try:
-                        self.nvim.command('lua require("pyrola")._on_repl_ready()')
-                    except Exception:
-                        pass
+                if self._nvim_address:
+                    self._start_nvim_thread()
+                    self.nvim_queue.put(("repl_ready", None))
                 # Get input with dynamic prompt
                 code = await self.session.prompt_async()
 
@@ -408,20 +448,58 @@ class ReplInterpreter:
         while True:
             try:
                 data = self.nvim_queue.get()
-                if data is None:  # Exit signal
+                if data is None:
                     break
                 try:
-                    dimensions = {
-                        "width": self.nvim.lua.vim.api.nvim_get_option("columns"),
-                        "height": self.nvim.lua.vim.api.nvim_get_option("lines"),
-                    }
+                    if isinstance(data, tuple) and len(data) == 2:
+                        kind, payload = data
+                    else:
+                        kind, payload = "image", data
+
+                    if kind == "repl_ready":
+                        if not self._ensure_nvim():
+                            continue
+                        try:
+                            with self.nvim_lock:
+                                self.nvim.command(
+                                    'lua require("pyrola")._on_repl_ready()'
+                                )
+                        except Exception as e:
+                            if self._handle_nvim_disconnect(e, "repl_ready"):
+                                continue
+                            print(f"Error in Neovim thread: {e}", file=sys.stderr)
+                        continue
+
+                    if kind != "image":
+                        continue
+
+                    if not self._ensure_nvim():
+                        continue
+                    try:
+                        with self.nvim_lock:
+                            dimensions = {
+                                "width": self.nvim.lua.vim.api.nvim_get_option(
+                                    "columns"
+                                ),
+                                "height": self.nvim.lua.vim.api.nvim_get_option(
+                                    "lines"
+                                ),
+                            }
+                    except Exception as e:
+                        if self._handle_nvim_disconnect(e, "image sync"):
+                            continue
+                        print(f"Error in Neovim thread: {e}", file=sys.stderr)
+                        continue
 
                     target_width = dimensions["width"] * 10 // 2
                     target_height = dimensions["height"] * 20 // 2
 
-                    # Decode base64 image
-                    img_bytes = base64.b64decode(data)
-                    img = Image.open(io.BytesIO(img_bytes))
+                    try:
+                        img_bytes = base64.b64decode(payload)
+                        img = Image.open(io.BytesIO(img_bytes))
+                    except Exception as e:
+                        print(f"Error handling image: {e}", file=sys.stderr)
+                        continue
 
                     orig_width, orig_height = img.size
 
@@ -453,7 +531,7 @@ class ReplInterpreter:
                     else:
                         new_width = orig_width
                         new_height = orig_height
-                        img_base64 = data
+                        img_base64 = payload
                     tmp_path = None
                     try:
                         with tempfile.NamedTemporaryFile(
@@ -470,21 +548,27 @@ class ReplInterpreter:
                                 file=sys.stderr,
                             )
                         escaped_path = self._vim_escape_string(tmp_path)
-                        self.nvim.command(
-                            f'let g:pyrola_image_path = "{escaped_path}"'
-                        )
-                        self.nvim.command(
-                            f"let g:pyrola_image_width = {int(new_width)}"
-                        )
-                        self.nvim.command(
-                            f"let g:pyrola_image_height = {int(new_height)}"
-                        )
-                        self.nvim.command(
-                            'lua require("pyrola.image").show_image_file(vim.g.pyrola_image_path, vim.g.pyrola_image_width, vim.g.pyrola_image_height)'
-                        )
-                        self.nvim.command("unlet g:pyrola_image_path")
-                        self.nvim.command("unlet g:pyrola_image_width")
-                        self.nvim.command("unlet g:pyrola_image_height")
+                        try:
+                            with self.nvim_lock:
+                                self.nvim.command(
+                                    f'let g:pyrola_image_path = "{escaped_path}"'
+                                )
+                                self.nvim.command(
+                                    f"let g:pyrola_image_width = {int(new_width)}"
+                                )
+                                self.nvim.command(
+                                    f"let g:pyrola_image_height = {int(new_height)}"
+                                )
+                                self.nvim.command(
+                                    'lua require("pyrola.image").show_image_file(vim.g.pyrola_image_path, vim.g.pyrola_image_width, vim.g.pyrola_image_height)'
+                                )
+                                self.nvim.command("unlet g:pyrola_image_path")
+                                self.nvim.command("unlet g:pyrola_image_width")
+                                self.nvim.command("unlet g:pyrola_image_height")
+                        except Exception as e:
+                            if self._handle_nvim_disconnect(e, "image sync"):
+                                continue
+                            print(f"Error in Neovim thread: {e}", file=sys.stderr)
                     finally:
                         if tmp_path:
                             self._cleanup_temp_path(tmp_path)
@@ -607,13 +691,9 @@ class ReplInterpreter:
 
                         try:
                             subprocess.run(["timg", "-p", "q", tmp_path], check=True)
-                            if (
-                                image_mime == "image/png"
-                                and self.nvim
-                                and self.nvim_thread
-                                and self.nvim_thread.is_alive()
-                            ):
-                                self.nvim_queue.put(image_data)
+                            if image_mime == "image/png" and self._nvim_address:
+                                self._start_nvim_thread()
+                                self.nvim_queue.put(("image", image_data))
                         except (
                             subprocess.CalledProcessError,
                             FileNotFoundError,
