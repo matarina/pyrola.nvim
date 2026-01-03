@@ -9,6 +9,7 @@ import base64
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -690,7 +691,11 @@ class ReplInterpreter:
                         self._register_temp_path(tmp_path)
 
                         try:
-                            subprocess.run(["timg", "-p", "q", tmp_path], check=True)
+                            # Get terminal size explicitly since prompt_toolkit
+                            # may prevent timg from detecting it
+                            term_size = shutil.get_terminal_size()
+                            size_arg = f"-g{term_size.columns}x{term_size.lines}"
+                            subprocess.run(["timg", "-p", "q", size_arg, tmp_path], check=True)
                             if image_mime == "image/png" and self._nvim_address:
                                 self._start_nvim_thread()
                                 self.nvim_queue.put(("image", image_data))
