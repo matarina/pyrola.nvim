@@ -439,7 +439,7 @@ local function check_and_install_dependencies()
             local error_lines = {}
 
             fn.jobstart({
-                python_executable, "-m", "pip", "install",,
+                python_executable, "-m", "pip", "install",
                 "pynvim", "jupyter-client", "prompt-toolkit", "pillow", "pygments"
             }, {
                 stdout_buffered = false,
