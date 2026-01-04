@@ -20,10 +20,13 @@ If you are seeking an alternative to Jupyter, Spyder, or RStudio, Pyrola is the 
 ## Features
 [![Watch the video](https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)](https://www.youtube.com/watch?v=S3arFOPnD40)
 - **Multi-language support**: Pyrola design based jupyter kernel, all language with jupyter kernel can be shiped  in pyrola.
+  ![recording_2026-01-04_07-36-08 - frame at 0m57s](https://github.com/user-attachments/assets/71d3ca3c-4f16-4567-b81c-c9d7e77383bc)
 - **Real-time REPL**: Execute code dynamically within Neovim, allowing for immediate feedback and interaction.
 - **multi  Code Block Selection method **: you can sending code by  semantic code block identficatin based treesitter syntax parser , or visual selction and whole buffer one click to repl console .
 - **Environment Variable Inspector**: Facilitate debugging by inspecting environment variables, check its atttibution (class, type) directly within the REPL.(currently only python and R supported )
+ ![recording_2026-01-04_07-36-08 - frame at 0m52s](https://github.com/user-attachments/assets/c6668a17-da69-4ae5-ba88-841ec9f3f059)
 - **Image Viewer**: Preview image outputs with a high (kitty image protoal based ) or rough (unicode/ascii based)resolution, providing a quick visual reference without the need for external viewers.
+  ![recording_2026-01-04_07-36-08 - frame at 0m40s](https://github.com/user-attachments/assets/7ad7400c-f251-452b-879f-e9bd39d4f791)
 - **history image viewer**: stored history image and browse hisotry plotted iamge in neovim float window 
 
 ## Installation
