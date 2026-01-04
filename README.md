@@ -12,7 +12,7 @@
 
 https://youtu.be/ugyOw3Hop08
 ## Features
-
+[![Watch the video](https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)](https://www.youtube.com/watch?v=S3arFOPnD40)
 - **Multi-language support**: Pyrola design based jupyter kernel, all language with jupyter kernel can be runned in pyrola.
 - **Real-time REPL**: Execute code dynamically within Neovim, allowing for immediate feedback and interaction.
 - **Semantic Code Block Selection**: Effortlessly select and dispatch specific code blocks for evaluation, enhancing the coding workflow.
