@@ -1,6 +1,7 @@
 <div align="center">
+![Uploading Gemini_Generated_Image_kj96q3kj96q3kj96.png…]()
 
-![Cool Text - Pyrola 475027950360735](https://github.com/user-attachments/assets/4d55bf4a-2a8c-402e-8c38-8038638e7bc4)
+
 
 </div>
 
