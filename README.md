@@ -8,7 +8,8 @@
 
 # Pyrola
 
-`pyrola` is  crafted to deliver a multi-language supported REPL (Read-Eval-Print Loop) experience within the Neovim environment. This innovative tool empowers users to engage in interactive programming, enabling them to swiftly inspect variables in real-time and visualize output images seamlessly.
+If you are seeking an alternative to Jupyter, Spyder, or RStudio, Pyrola is the solution. Designed to deliver a multi-language REPL (Read-Eval-Print Loop) experience within Neovim, this tool helps users—particularly data scientists—excel at interactive programming. It enables real-time variable inspection and image visualization. Since it is based on Jupyter, in theory, any language with a Jupyter kernel can be integrated into Pyrola.
+
 ## DEMO
 <div align="center">
   <a href="https://www.youtube.com/watch?v=S3arFOPnD40">
@@ -18,48 +19,18 @@
 
 ## Features
 [![Watch the video](https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)](https://www.youtube.com/watch?v=S3arFOPnD40)
-- **Multi-language support**: Pyrola design based jupyter kernel, all language with jupyter kernel can be runned in pyrola.
+- **Multi-language support**: Pyrola design based jupyter kernel, all language with jupyter kernel can be shiped  in pyrola.
 - **Real-time REPL**: Execute code dynamically within Neovim, allowing for immediate feedback and interaction.
-- **Semantic Code Block Selection**: Effortlessly select and dispatch specific code blocks for evaluation, enhancing the coding workflow.
-- **Environment Variable Inspector**: Facilitate debugging by inspecting environment variables directly within the REPL.
-- **Image Viewer**: Preview image outputs with a high or rough resolution, providing a quick visual reference without the need for external viewers.
-- **Lightweight and Low-level**: Designed with efficiency in mind, `pyrola` integrates seamlessly into your existing workflow without unnecessary overhead.
+- **multi  Code Block Selection method **: you can sending code by  semantic code block identficatin based treesitter syntax parser , or visual selction and whole buffer one click to repl console .
+- **Environment Variable Inspector**: Facilitate debugging by inspecting environment variables, check its atttibution (class, type) directly within the REPL.(currently only python and R supported )
+- **Image Viewer**: Preview image outputs with a high (kitty image protoal based ) or rough (unicode/ascii based)resolution, providing a quick visual reference without the need for external viewers.
+- **history image viewer**: stored history image and browse hisotry plotted iamge in neovim float window 
 
 ## Installation
 
-### 1) Python + Jupyter prerequisites
+### 1) default setup 
 
-Pyrola talks to Jupyter kernels through Neovim's Python provider. Install the core Python deps first:
-
-```bash
-python3 -m pip install --user pynvim jupyter-client prompt-toolkit pillow pygments
-```
-
-Then install a Jupyter kernel for each language you want to use. For Python:
-
-```bash
-python3 -m pip install --user ipykernel
-python3 -m ipykernel install --user --name python3
-```
-
-For other languages, install their Jupyter kernels and use the kernel name in `kernel_map`:
-
-- R: `IRkernel::installspec()` (from R)
-- C++: `xeus-cling` (kernel name varies by install)
-
-### 2) Image preview helper (recommended)
-
-Pyrola can render images inside the REPL. It uses [timg](https://github.com/hzeller/timg) for terminal previews. On Debian/Ubuntu:
-
-```bash
-apt install timg
-```
-
-Note for tmux: image hide/show on pane or window switches relies on focus events. Pyrola will try to enable tmux focus events for the current session. To configure it yourself, add `set -g focus-events on` to `~/.tmux.conf`, or disable the auto toggle with `image = { tmux_focus_events = false }` in `pyrola.setup`. If focus events are unreliable in your setup, enable the polling fallback with `image = { tmux_pane_poll = true, tmux_pane_poll_interval = 500 }`. For more precise square floats, tune the cell size mapping with `image = { cell_width = 10, cell_height = 20 }`, or allow tmux auto-detection (default) and disable it with `image = { tmux_cell_size = false }`.
-
-### 3) Install the plugin (lazy.nvim)
-
-Add Pyrola to your plugin manager and run `:UpdateRemotePlugins` once after install (or keep the build step below):
+Add Pyrola to your plugin manager ,lazy example below :
 
 ```lua
   {
@@ -70,9 +41,9 @@ Add Pyrola to your plugin manager and run `:UpdateRemotePlugins` once after inst
         local pyrola = require("pyrola")
         pyrola.setup({
             kernel_map = {
-                python = "python3",
-                r = "ir",
-                cpp = "xcpp14"
+                python = "py3", --jupyter kenrel  name 
+                r = "ir"
+ 
             },
             split_horizen = false,
             split_ratio = 0.3,
@@ -80,15 +51,21 @@ Add Pyrola to your plugin manager and run `:UpdateRemotePlugins` once after inst
             image_manager_key = "<leader>im"
         })
 
-        -- Key mappings
+        -- Default Key mappings, Adjust to taste:
+-- semantic code blcok sending based current cursor position
         vim.keymap.set("n", "<Enter>", function() pyrola.send_statement_definition() end, { noremap = true })
+-- visual selection  code blcok sending based selection region .
         vim.keymap.set("v", '<leader>vs', function() require('pyrola').send_visual_to_repl() end, { noremap = true})
+-- whole buffer   code blcok sending 
         vim.keymap.set("n", "<leader>vb", function() pyrola.send_buffer_to_repl() end, { noremap = true })
+ -- whole buffer  sending 
         vim.keymap.set("n", "<leader>is", function() pyrola.inspect() end, { noremap = true })
+ -- history image viewer 
+        vim.keymap.set("n", '<leader>im', function()  pyrola.open_history_manager() end, { noremap = true })
     end,
   },
 
-  -- SEPARATE Treesitter Configuration
+  -- Treesitter is necessary , and the language parser specified in  kernel_map should be ensure  installed . 
   {
     "nvim-treesitter/nvim-treesitter",
     build = ":TSUpdate",
@@ -102,12 +79,44 @@ Add Pyrola to your plugin manager and run `:UpdateRemotePlugins` once after inst
         })
 
         -- NEW WAY to install parsers via Lua
-        ts.install({  "r", "python", "lua", "vim", "vimdoc" })
+        ts.install({  "r", "python", "lua"}) -- PYthon and R is necessary as metioned in pyrola setup
     end
   }
 ```
 
-Note: `send_buffer_key` and `image_manager_key` create default mappings during setup. If you keep those defaults, you can omit the manual mappings for those actions.
+### 2) python + pip in path 
+
+Pyrola is developed base pynvim , so make sure python  and pip is availabel in path. vritual env list conda is highly recommand. for conda exampel ,setup init lua and then  activate conda env  , will automatly prompt you to install related  dependencies python packages
+ or you can install them manually
+```bash
+python3 -m pip install --user pynvim jupyter-client prompt-toolkit pillow pygments
+```
+
+Then install a Jupyter kernel for each language you want to use.
+ For Python example:
+
+```bash
+python3 -m pip install --user ipykernel
+python3 -m ipykernel install --user --name py3 # name "py3" must Identical to the name in kernel_map
+```
+
+For other languages, install their Jupyter kernels and use the kernel name in `kernel_map`:
+
+- R: `IRkernel::installspec()` (from R)
+- C++: `xeus-cling` (kernel name varies by install)
+
+### 2) Image preview helper (recommended)
+
+Pyrola can render images inside the REPL. for high quality image view, kitty terminal is necessary . for repl console membeded pixel iamge view, [timg](https://github.com/hzeller/timg) is necessasry . On Debian/Ubuntu:
+
+```bash
+apt install timg
+```
+
+Note for tmux: image hide/show on pane or window switches relies on focus events. Pyrola will try to enable tmux focus events for the current session. To configure it yourself, add `set -g focus-events on` to `~/.tmux.conf`, or disable the auto toggle with `image = { tmux_focus_events = false }` in `pyrola.setup`. If focus events are unreliable in your setup, enable the polling fallback with `image = { tmux_pane_poll = true, tmux_pane_poll_interval = 500 }`. For more precise square floats, tune the cell size mapping with `image = { cell_width = 10, cell_height = 20 }`, or allow tmux auto-detection (default) and disable it with `image = { tmux_cell_size = false }`.
+
+
+
 
 ## Usage
 
@@ -124,11 +133,10 @@ If you change kernel names or add languages, update `kernel_map` in `pyrola.setu
 - Visual selection: `pyrola.send_visual_to_repl()`
 - Whole buffer: `pyrola.send_buffer_to_repl()`
 
-Treesitter improves block detection for `send_statement_definition()`. Install the parser for your language if block selection feels off.
 
 ### Inspect variables
 
-Use `pyrola.inspect()` while your cursor is on a symbol. This currently supports Python and R (easy to extend).
+Use `pyrola.inspect()` while your cursor is on a symbol. This currently supports Python and R (easy to extend by yourself , contribution welcome!).
 
 ### Image history manager
 
@@ -138,42 +146,7 @@ Press `<leader>im` (default) to open the image manager float. When the manager i
 - `l`: next image
 - `q`: close the window
 
-### Key Bindings
 
-Below are recommended key bindings. Adjust to taste:
-
-```lua
--- nvim_ds_repl plugin configuration --
-vim.api.nvim_create_autocmd({"BufEnter", "BufWinEnter"}, {
-    pattern = {"*.py", "*.R"},
-    callback = function()
-        -- Execute the current statement or block under the cursor
-        vim.keymap.set("n", '<CR>', function()
-            require('pyrola').send_statement_definition()
-        end, { noremap = true })
-
-        -- Execute the selected visual block of code
-        vim.keymap.set("v", '<leader>vs', function()
-            require('pyrola').send_visual_to_repl()
-        end, { noremap = true })
-
-        -- Execute the whole buffer
-        vim.keymap.set("n", '<leader>vb', function()
-            require('pyrola').send_buffer_to_repl()
-        end, { noremap = true })
-
-        -- Query information about the specific object under the cursor
-        vim.keymap.set("n", '<leader>is', function()
-            require('pyrola').inspect()
-        end, { noremap = true })
-
-        -- Open image history manager
-        vim.keymap.set("n", '<leader>im', function()
-            require('pyrola.image').open_history_manager()
-        end, { noremap = true })
-    end
-})
-```
 
 ## Credit
 
