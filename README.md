@@ -1,9 +1,10 @@
 <div align="center">
-![Uploading Gemini_Generated_Image_kj96q3kj96q3kj96.png…]()
 
 
 
-</div>
+
+</div><img width="2004" height="538" alt="logo" src="https://github.com/user-attachments/assets/f4e9d2f9-488a-4d02-9cea-a7ced4c44011" />
+
 
 # Pyrola
 
