@@ -8,6 +8,11 @@
 
 `pyrola` is  crafted to deliver a multi-language supported REPL (Read-Eval-Print Loop) experience within the Neovim environment. This innovative tool empowers users to engage in interactive programming, enabling them to swiftly inspect variables in real-time and visualize output images seamlessly.
 ## DEMO
+<div align="center">
+  <a href="https://www.youtube.com/watch?v=S3arFOPnD40">
+    <img src="https://img.youtube.com/vi/S3arFOPnD40/0.jpg" alt="Watch the video" style="width:100%;">
+  </a>
+</div>
 
 ## Features
 [![Watch the video](https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)](https://www.youtube.com/watch?v=S3arFOPnD40)
