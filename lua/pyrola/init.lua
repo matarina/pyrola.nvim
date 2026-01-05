@@ -8,9 +8,7 @@ local M = {
             cpp = "xcpp17"
         },
         split_horizen = false,
-        split_ratio = 0.65,
-        send_buffer_key = "<leader>vb",
-        image_manager_key = "<leader>im"
+        split_ratio = 0.65
     },
     term = {
         opened = 0,
@@ -566,21 +564,6 @@ function M.setup(opts)
             vim.notify("Pyrola: Unknown command. Try :Pyrola init", vim.log.levels.WARN)
         end, {nargs = 1})
         M.commands_set = true
-    end
-    if not M.keymaps_set then
-        local key = M.config.send_buffer_key
-        if key and key ~= "" then
-            vim.keymap.set("n", key, function()
-                M.send_buffer_to_repl()
-            end, {noremap = true, silent = true, desc = "Pyrola send buffer"})
-        end
-        local image_key = M.config.image_manager_key
-        if image_key and image_key ~= "" then
-            vim.keymap.set("n", image_key, function()
-                require("pyrola.image").open_history_manager()
-            end, {noremap = true, silent = true, desc = "Pyrola image manager"})
-        end
-        M.keymaps_set = true
     end
     return M
 end
