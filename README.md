@@ -247,6 +247,16 @@ When focused:
 * `h` — Previous image
 * `l` — Next image
 * `q` — Close
+  
+## TODO
+
+- [ ] **Global variable list**
+  - Display all global variables in a floating window
+  - Support sorting and quick lookup
+
+- [ ] **Multi-language variable inspector**
+  - Extend variable inspection beyond Python and R
+  - Provide a common inspection interface for different Jupyter kernels
 
 ## Credits
 
