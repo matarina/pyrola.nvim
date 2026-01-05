@@ -63,8 +63,10 @@ Add Pyrola to your plugin manager. An example using `lazy.nvim` is provided belo
         python = "py3", -- Jupyter kernel name
         r = "ir",
       },
-      split_horizen = false,
-      split_ratio = 0.65, --width of splited REPL terminal
+      split_horizon = false, 
+      split_ratio = 0.3, --width of splited REPL terminal
+      send_buffer_key = "<leader>vb",
+      image_manager_key = "<leader>im",
     })
 
     -- Default key mappings (adjust to taste)
@@ -119,7 +121,7 @@ Add Pyrola to your plugin manager. An example using `lazy.nvim` is provided belo
 
 Pyrola is built on `pynvim`, so ensure `python` and `pip` are available in your PATH. Virtual environments (like Conda) are highly recommended.
 
-after setting up your `init.lua` and then activate a Conda environment, Pyrola will automatically prompt you to install the related Python dependencies. Alternatively, you can install them manually:
+after setting up your `init.lua` and then activate a Conda environment,  Pyrola will automatically prompt you to install the related Python dependencies when first time run 'Pyrola init',. Alternatively, you can install them manually:
 
 ```bash
 python3 -m pip install pynvim jupyter-client prompt-toolkit pillow pygments
@@ -241,3 +243,5 @@ Contributions are welcome! Pyrola is in its early stages and actively maintained
 **Note:** For enhanced image rendering, terminal graphic protocols such as **Sixel** are not yet supported inside Neovim terminal buffers due to upstream limitations (see [Neovim Issue #30889](https://github.com/neovim/neovim/issues/30889)).
 
 Stay tuned for future improvements! 🚀
+
+
