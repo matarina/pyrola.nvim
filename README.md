@@ -63,8 +63,8 @@ Add Pyrola to your plugin manager. An example using `lazy.nvim` is provided belo
         python = "py3", -- Jupyter kernel name
         r = "ir",
       },
-      split_horizon = false, -- Fixed typo: changed 'horizen' to 'horizon'
-      split_ratio = 0.3,
+      split_horizon = false, 
+      split_ratio = 0.3, --width of splited REPL terminal
       send_buffer_key = "<leader>vb",
       image_manager_key = "<leader>im",
     })
