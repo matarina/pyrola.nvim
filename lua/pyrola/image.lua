@@ -5,18 +5,11 @@ local loop = vim.loop
 local is_tmux = os.getenv("TMUX")
 
 local default_image_config = {
-    tmux_focus_events = true,
-    tmux_pane_poll = false,
-    tmux_pane_poll_interval = 500,
     cell_width = 10,
     cell_height = 20
 }
 
 local image_config = vim.deepcopy(default_image_config)
-local tmux_poll_timer = nil
-local tmux_pane_active = nil
-local tmux_focus_events_enable = nil
-local start_tmux_pane_poll = nil
 
 local function refresh_image_config()
     local ok, pyrola = pcall(require, "pyrola")
@@ -277,8 +270,6 @@ end
 
 local function display_image(base64_data, width, height, record_history, focus, auto_clear)
     refresh_image_config()
-    tmux_focus_events_enable()
-    start_tmux_pane_poll()
     if not stdout then
         vim.notify("Pyrola: Image display disabled (no TTY available).", vim.log.levels.WARN)
         return
@@ -365,81 +356,14 @@ local function redraw_image()
 end
 
 -- Setup global autocmds for VimLeave (run once at module load)
-tmux_focus_events_enable = function()
-    if not is_tmux or not image_config.tmux_focus_events then
-        return
-    end
-    if vim.fn.executable("tmux") == 0 then
-        return
-    end
-    vim.fn.system({"tmux", "set-option", "-g", "focus-events", "on"})
-end
-
-local function tmux_pane_is_active()
-    if not is_tmux or vim.fn.executable("tmux") == 0 then
-        return true
-    end
-    local pane_id = os.getenv("TMUX_PANE")
-    if not pane_id or pane_id == "" then
-        return true
-    end
-    local ok, output = pcall(vim.fn.system, {"tmux", "display-message", "-p", "-t", pane_id, "#{pane_active}"})
-    if not ok then
-        return true
-    end
-    output = tostring(output or ""):gsub("%s+", "")
-    return output == "1"
-end
-
-local function stop_tmux_pane_poll()
-    if tmux_poll_timer then
-        tmux_poll_timer:stop()
-        tmux_poll_timer:close()
-        tmux_poll_timer = nil
-    end
-    tmux_pane_active = nil
-end
-
-start_tmux_pane_poll = function()
-    if not is_tmux or not image_config.tmux_pane_poll or tmux_poll_timer then
-        return
-    end
-    local interval = tonumber(image_config.tmux_pane_poll_interval) or default_image_config.tmux_pane_poll_interval
-    tmux_poll_timer = loop.new_timer()
-    tmux_poll_timer:start(
-        0,
-        interval,
-        vim.schedule_wrap(function()
-            local active = tmux_pane_is_active()
-            if tmux_pane_active == nil then
-                tmux_pane_active = active
-                return
-            end
-            if tmux_pane_active ~= active then
-                tmux_pane_active = active
-                if active then
-                    if M.current_winid and api.nvim_win_is_valid(M.current_winid) then
-                        redraw_image()
-                    end
-                else
-                    clear_image(1)
-                end
-            end
-        end)
-    )
-end
-
 local function setup_global_autocmds()
     refresh_image_config()
-    tmux_focus_events_enable()
-    start_tmux_pane_poll()
     local group = api.nvim_create_augroup("ImageGlobal", {clear = true})
 
     -- Clear image when quitting Neovim
     api.nvim_create_autocmd("VimLeavePre", {
         group = group,
         callback = function()
-            stop_tmux_pane_poll()
             clear_image(1)
         end
     })
