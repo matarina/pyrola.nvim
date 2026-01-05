@@ -19,7 +19,7 @@ Since Pyrola is built on Jupyter kernels, **any language** with a Jupyter kernel
 
 ---
 
-## DEMO
+## DEMO VIDEO
 
 <div align="center">
   <a href="https://www.youtube.com/watch?v=S3arFOPnD40">
