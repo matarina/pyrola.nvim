@@ -63,10 +63,16 @@ Add Pyrola to your plugin manager. An example using `lazy.nvim` is provided belo
         python = "py3", -- Jupyter kernel name
         r = "ir",
       },
-      split_horizon = false, 
-      split_ratio = 0.3, --width of splited REPL terminal
-      send_buffer_key = "<leader>vb",
-      image_manager_key = "<leader>im",
+      split_horizen = false,
+      split_ratio = 0.65, --width of splited REPL terminal
+      image = {
+        cell_width = 10, -- approximate terminal cell width in pixels
+        cell_height = 20, -- approximate terminal cell height in pixels
+        max_width_ratio = 0.5, -- image width as a fraction of editor columns
+        max_height_ratio = 0.5, -- image height as a fraction of editor lines
+        offset_row = 0, -- adjust image row position (cells)
+        offset_col = 0, -- adjust image col position (cells)
+      },
     })
 
     -- Default key mappings (adjust to taste)
@@ -115,6 +121,17 @@ Add Pyrola to your plugin manager. An example using `lazy.nvim` is provided belo
   end,
 }
 
+```
+
+Highlight groups are theme-aware by default (linked to `FloatBorder`, `FloatTitle`, and `NormalFloat`). Override them if you want custom colors:
+
+```lua
+vim.api.nvim_set_hl(0, "PyrolaInspectorBorder", { link = "FloatBorder" })
+vim.api.nvim_set_hl(0, "PyrolaInspectorTitle", { link = "FloatTitle" })
+vim.api.nvim_set_hl(0, "PyrolaInspectorNormal", { link = "NormalFloat" })
+vim.api.nvim_set_hl(0, "PyrolaImageBorder", { link = "FloatBorder" })
+vim.api.nvim_set_hl(0, "PyrolaImageTitle", { link = "FloatTitle" })
+vim.api.nvim_set_hl(0, "PyrolaImageNormal", { link = "NormalFloat" })
 ```
 
 ### 2) Python + Pip in PATH
@@ -243,5 +260,3 @@ Contributions are welcome! Pyrola is in its early stages and actively maintained
 **Note:** For enhanced image rendering, terminal graphic protocols such as **Sixel** are not yet supported inside Neovim terminal buffers due to upstream limitations (see [Neovim Issue #30889](https://github.com/neovim/neovim/issues/30889)).
 
 Stay tuned for future improvements! 🚀
-
-

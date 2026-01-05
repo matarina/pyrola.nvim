@@ -8,7 +8,13 @@ local M = {
             cpp = "xcpp17"
         },
         split_horizen = false,
-        split_ratio = 0.65
+        split_ratio = 0.65,
+        image = {
+            cell_width = 10,
+            cell_height = 20,
+            max_width_ratio = 0.5,
+            max_height_ratio = 0.5
+        }
     },
     term = {
         opened = 0,
@@ -127,6 +133,21 @@ local function init_kernel(kernelname)
     return result
 end
 
+local function build_repl_env()
+    local image = M.config.image or {}
+    local cell_width = tonumber(image.cell_width) or 10
+    local cell_height = tonumber(image.cell_height) or 20
+    local max_width_ratio = tonumber(image.max_width_ratio) or 0.5
+    local max_height_ratio = tonumber(image.max_height_ratio) or 0.5
+
+    return {
+        PYROLA_IMAGE_CELL_WIDTH = tostring(cell_width),
+        PYROLA_IMAGE_CELL_HEIGHT = tostring(cell_height),
+        PYROLA_IMAGE_MAX_WIDTH_RATIO = tostring(max_width_ratio),
+        PYROLA_IMAGE_MAX_HEIGHT_RATIO = tostring(max_height_ratio)
+    }
+end
+
 local function open_terminal(python_executable)
     M.filetype = vim.bo.filetype
     local origin_win = api.nvim_get_current_win()
@@ -165,7 +186,13 @@ local function open_terminal(python_executable)
     api.nvim_win_set_buf(0, bufid)
     local winid = api.nvim_get_current_win()
 
-    vim.wo.winfixheight = true
+    if M.config.split_horizen then
+        vim.wo.winfixheight = true
+        vim.wo.winfixwidth = false
+    else
+        vim.wo.winfixwidth = true
+        vim.wo.winfixheight = false
+    end
 
     local statusline_format = string.format("Kernel: %s  |  Line : %%l ", kernelname)
     api.nvim_win_set_option(winid, "statusline", statusline_format)
@@ -190,6 +217,7 @@ local function open_terminal(python_executable)
             fn.termopen(
             term_cmd,
             {
+                env = build_repl_env(),
                 on_exit = function()
                 end
             }
@@ -394,11 +422,32 @@ local function create_pretty_float(content)
 
     local winid = api.nvim_open_win(bufnr, true, opts)
 
-    api.nvim_set_hl(0, "FloatBorder", {fg = "#89b4fa", bg = "#1e1e2e"})
-    api.nvim_set_hl(0, "FloatTitle", {fg = "#89b4fa", bg = "#1e1e2e"})
-    api.nvim_set_hl(0, "NormalFloat", {bg = "#1e1e2e"})
+    local border_hl = "PyrolaInspectorBorder"
+    local title_hl = "PyrolaInspectorTitle"
+    local normal_hl = "PyrolaInspectorNormal"
 
-    api.nvim_win_set_option(winid, "winhl", "Normal:NormalFloat,FloatBorder:FloatBorder,FloatTitle:FloatTitle")
+    if not M._inspector_highlights_set then
+        local border_target = fn.hlexists("FloatBorder") == 1 and "FloatBorder" or "WinSeparator"
+        local title_target = fn.hlexists("FloatTitle") == 1 and "FloatTitle" or "Title"
+        local normal_target = fn.hlexists("NormalFloat") == 1 and "NormalFloat" or "Normal"
+
+        if fn.hlexists(border_hl) == 0 then
+            api.nvim_set_hl(0, border_hl, {link = border_target})
+        end
+        if fn.hlexists(title_hl) == 0 then
+            api.nvim_set_hl(0, title_hl, {link = title_target})
+        end
+        if fn.hlexists(normal_hl) == 0 then
+            api.nvim_set_hl(0, normal_hl, {link = normal_target})
+        end
+        M._inspector_highlights_set = true
+    end
+
+    api.nvim_win_set_option(
+        winid,
+        "winhl",
+        string.format("Normal:%s,FloatBorder:%s,FloatTitle:%s", normal_hl, border_hl, title_hl)
+    )
 
     local keymap_opts = {noremap = true, silent = true, buffer = bufnr}
     vim.keymap.set(
@@ -818,6 +867,10 @@ function M.send_statement_definition()
 end
 
 -- Image history functions
+function M.open_history_manager()
+    require("pyrola.image").open_history_manager()
+end
+
 function M.show_last_image()
     if M.term.opened == 0 or M.term.chanid == 0 then
         return

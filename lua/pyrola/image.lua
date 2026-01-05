@@ -1,12 +1,17 @@
 local M = {}
 
 local api = vim.api
+local fn = vim.fn
 local loop = vim.loop
 local is_tmux = os.getenv("TMUX")
 
 local default_image_config = {
     cell_width = 10,
-    cell_height = 20
+    cell_height = 20,
+    max_width_ratio = 0.5,
+    max_height_ratio = 0.5,
+    offset_row = 0,
+    offset_col = 0
 }
 
 local image_config = vim.deepcopy(default_image_config)
@@ -53,9 +58,10 @@ local function get_chunked(str)
     if type(str) ~= "string" then
         return {}
     end
+    local chunk_size = is_tmux and 1024 or 4096
     local chunks = {}
-    for i = 1, #str, 4096 do
-        local chunk = str:sub(i, i + 4096 - 1):gsub("%s", "")
+    for i = 1, #str, chunk_size do
+        local chunk = str:sub(i, i + chunk_size - 1):gsub("%s", "")
         if #chunk > 0 then
             table.insert(chunks, chunk)
         end
@@ -81,6 +87,67 @@ local function read_file(path)
     return content
 end
 
+local function get_tmux_offset(cursor_row, cursor_col)
+    if not is_tmux then
+        return 0, 0
+    end
+    if fn.executable("tmux") == 0 then
+        return 0, 0
+    end
+    if not cursor_row or not cursor_col then
+        return 0, 0
+    end
+    local pane = os.getenv("TMUX_PANE")
+    local function read_tmux(format)
+        local args = {"tmux", "display-message", "-p"}
+        if pane and pane ~= "" then
+            table.insert(args, "-t")
+            table.insert(args, pane)
+        end
+        table.insert(args, format)
+        local output = fn.systemlist(args)
+        local line = output and output[1] or ""
+        local left, top, cursor_x, cursor_y = line:match("(%d+)%s+(%d+)%s+(%d+)%s+(%d+)")
+        if not left then
+            return nil
+        end
+        return tonumber(left), tonumber(top), tonumber(cursor_x), tonumber(cursor_y)
+    end
+
+    local left, top, cursor_x, cursor_y =
+        read_tmux("#{pane_left} #{pane_top} #{pane_cursor_x} #{pane_cursor_y}")
+    if not left then
+        left, top, cursor_x, cursor_y = read_tmux("#{pane_left} #{pane_top} #{cursor_x} #{cursor_y}")
+    end
+    if not left or not top or not cursor_x or not cursor_y then
+        return 0, 0
+    end
+    local global_row = top + cursor_y + 1
+    local global_col = left + cursor_x + 1
+    local row_offset = global_row - cursor_row
+    local col_offset = global_col - cursor_col
+    return row_offset, col_offset
+end
+
+local function get_cursor_screenpos_raw()
+    local winid = api.nvim_get_current_win()
+    if not api.nvim_win_is_valid(winid) then
+        return nil, nil
+    end
+    local cursor = api.nvim_win_get_cursor(winid)
+    local row = cursor[1]
+    local col = cursor[2] + 1
+    local ok, pos = pcall(fn.screenpos, winid, row, col)
+    if ok and type(pos) == "table" then
+        local screen_row = tonumber(pos.row) or 0
+        local screen_col = tonumber(pos.col) or 0
+        if screen_row >= 1 and screen_col >= 1 then
+            return screen_row, screen_col
+        end
+    end
+    return nil, nil
+end
+
 local function tmux_wrap(cmd)
     if is_tmux then
         cmd = cmd:gsub('\027', '\027\027')
@@ -97,21 +164,56 @@ local function build_control_string(control)
     return table.concat(parts, ",")
 end
 
-local function send_image_chunks(control_str, chunks, x, y)
+local function get_window_screenpos(winid)
+    local ok, pos = pcall(fn.screenpos, winid, 1, 1)
+    if ok and type(pos) == "table" then
+        local row = tonumber(pos.row) or 0
+        local col = tonumber(pos.col) or 0
+        if row >= 1 and col >= 1 then
+            return row, col
+        end
+    end
+
+    local ok_win, winpos = pcall(fn.win_screenpos, winid)
+    if not ok_win or type(winpos) ~= "table" then
+        return nil, nil
+    end
+    local row = tonumber(winpos[1]) or 0
+    local col = tonumber(winpos[2]) or 0
+    if row < 1 or col < 1 then
+        return nil, nil
+    end
+    return row, col
+end
+
+local function send_image_chunks(control_str, chunks, x, y, restore_row, restore_col)
     if #chunks == 0 then
         return
     end
-    write("\x1b[s")
-    write(string.format("\x1b[%d;%dH", y, x))
+    if is_tmux then
+        for i = 1, #chunks do
+            local chunk_control = control_str .. ",m=" .. (i < #chunks and "1" or "0")
+            local parts = {
+                string.format("\x1b[%d;%dH", y, x),
+                string.format("\x1b_G%s;%s\x1b\\", chunk_control, chunks[i])
+            }
+            if i == #chunks and restore_row and restore_col then
+                parts[#parts + 1] = string.format("\x1b[%d;%dH", restore_row, restore_col)
+            end
+            write(tmux_wrap(table.concat(parts)))
+        end
+        return
+    end
 
+    write(string.format("\x1b[%d;%dH", y, x))
     for i = 1, #chunks do
         local chunk_control = control_str .. ",m=" .. (i < #chunks and "1" or "0")
         local cmd = string.format("\x1b_G%s;%s\x1b\\", chunk_control, chunks[i])
-        write(tmux_wrap(cmd))
-        loop.sleep(1)
+        write(cmd)
     end
-
-    write("\x1b[u")
+    if restore_row and restore_col then
+        write(string.format("\x1b[%d;%dH", restore_row, restore_col))
+    end
 end
 
 local function pixels_to_cells(pixels, is_width)
@@ -131,7 +233,7 @@ local function create_image_float(image_width, image_height, focus)
     local width_cells = pixels_to_cells(image_width, true)
     local height_cells = pixels_to_cells(image_height, false)
 
-    -- Add padding for border (1 cell each side) + small margin
+    -- Add small padding inside the content area for centering
     local float_width = width_cells + 2
     local float_height = height_cells + 2
 
@@ -158,16 +260,36 @@ local function create_image_float(image_width, image_height, focus)
     local winid = api.nvim_open_win(bufnr, focus or false, opts)
 
     -- Set window highlights
-    if not M._float_highlights_set then
-        api.nvim_set_hl(0, "FloatBorder", {fg = "#89b4fa", bg = "#1e1e2e"})
-        api.nvim_set_hl(0, "FloatTitle", {fg = "#89b4fa", bg = "#1e1e2e"})
-        api.nvim_set_hl(0, "NormalFloat", {bg = "#ffffff"})
-        M._float_highlights_set = true
+    local border_hl = "PyrolaImageBorder"
+    local title_hl = "PyrolaImageTitle"
+    local normal_hl = "PyrolaImageNormal"
+
+    if not M._image_highlights_set then
+        local border_target = fn.hlexists("FloatBorder") == 1 and "FloatBorder" or "WinSeparator"
+        local title_target = fn.hlexists("FloatTitle") == 1 and "FloatTitle" or "Title"
+        local normal_target = fn.hlexists("NormalFloat") == 1 and "NormalFloat" or "Normal"
+
+        if fn.hlexists(border_hl) == 0 then
+            api.nvim_set_hl(0, border_hl, {link = border_target})
+        end
+        if fn.hlexists(title_hl) == 0 then
+            api.nvim_set_hl(0, title_hl, {link = title_target})
+        end
+        if fn.hlexists(normal_hl) == 0 then
+            api.nvim_set_hl(0, normal_hl, {link = normal_target})
+        end
+        M._image_highlights_set = true
     end
 
-    local winhl = "Normal:NormalFloat,FloatBorder:FloatBorder,FloatTitle:FloatTitle"
+    local winhl = string.format("Normal:%s,FloatBorder:%s,FloatTitle:%s", normal_hl, border_hl, title_hl)
     if focus then
-        winhl = winhl .. ",Cursor:NormalFloat,lCursor:NormalFloat,CursorLine:NormalFloat,CursorLineNr:NormalFloat"
+        winhl = winhl .. string.format(
+            ",Cursor:%s,lCursor:%s,CursorLine:%s,CursorLineNr:%s",
+            normal_hl,
+            normal_hl,
+            normal_hl,
+            normal_hl
+        )
     end
     api.nvim_win_set_option(winid, "winhl", winhl)
 
@@ -178,21 +300,21 @@ end
 -- Calculate image position centered within float window
 -- float_row/col are 0-indexed from editor top-left
 -- Add 1 for border, then center image within content area
-local function get_image_position(float_row, float_col, float_width, float_height, image_width, image_height)
+local function get_image_position(base_row, base_col, float_width, float_height, image_width, image_height)
     local width_cells = pixels_to_cells(image_width, true)
     local height_cells = pixels_to_cells(image_height, false)
 
-    -- Content area is inside border (subtract 2 for borders)
-    local content_width = float_width - 2
-    local content_height = float_height - 2
+    -- Content area is the floating window itself (border is outside)
+    local content_width = float_width
+    local content_height = float_height
 
     -- Center image within content area
-    local x_offset = math.floor((content_width - width_cells) / 2)
-    local y_offset = math.floor((content_height - height_cells) / 2)
+    local x_offset = math.max(0, math.floor((content_width - width_cells) / 2))
+    local y_offset = math.max(0, math.floor((content_height - height_cells) / 2))
 
-    -- Position: float position + border (1) + title row (1) + centering offset
-    local x = float_col + 5 + x_offset
-    local y = float_row + 5 + y_offset
+    -- Position: top-left window in screen coords + centering offset
+    local x = base_col + x_offset
+    local y = base_row + y_offset
 
     return math.max(x, 1), math.max(y, 1)
 end
@@ -268,6 +390,44 @@ local function set_manager_keymaps(bufnr)
     end, opts)
 end
 
+local function draw_image(base64_data, width, height, winid, float_row, float_col, float_width, float_height)
+    if not api.nvim_win_is_valid(winid) then
+        return
+    end
+    local cursor_row, cursor_col = get_cursor_screenpos_raw()
+    local row_offset, col_offset = get_tmux_offset(cursor_row, cursor_col)
+    local row_adjust = tonumber(image_config.offset_row) or 0
+    local col_adjust = tonumber(image_config.offset_col) or 0
+    local base_row, base_col = get_window_screenpos(winid)
+    if not base_row then
+        base_row = float_row + 1
+        base_col = float_col + 1
+    end
+    base_row = base_row + row_offset + row_adjust
+    base_col = base_col + col_offset + col_adjust
+    local x, y = get_image_position(base_row, base_col, float_width, float_height, width, height)
+
+    local control = {
+        a = "T", -- Transmit and display
+        f = 100, -- PNG format
+        t = "d", -- Direct transmission
+        q = 2, -- Quiet mode
+        i = 1, -- Image ID
+        C = 1, -- Don't move cursor
+        w = width, -- Image width
+        h = height -- Image height
+    }
+
+    local control_str = build_control_string(control)
+    local chunks = get_chunked(base64_data)
+    local restore_row, restore_col = nil, nil
+    if cursor_row and cursor_col then
+        restore_row = cursor_row + row_offset
+        restore_col = cursor_col + col_offset
+    end
+    send_image_chunks(control_str, chunks, x, y, restore_row, restore_col)
+end
+
 local function display_image(base64_data, width, height, record_history, focus, auto_clear)
     refresh_image_config()
     if not stdout then
@@ -298,25 +458,14 @@ local function display_image(base64_data, width, height, record_history, focus, 
     M.current_image_data = base64_data
     M.current_image_width = width
     M.current_image_height = height
-    M.current_float_pos = {row = float_row, col = float_col, width = float_width, height = float_height}
+    M.current_float_pos = {winid = winid, row = float_row, col = float_col, width = float_width, height = float_height}
 
-    -- Calculate position centered within the float window
-    local x, y = get_image_position(float_row, float_col, float_width, float_height, width, height)
-
-    local control = {
-        a = "T", -- Transmit and display
-        f = 100, -- PNG format
-        t = "d", -- Direct transmission
-        q = 2, -- Quiet mode
-        i = 1, -- Image ID
-        C = 1, -- Don't move cursor
-        w = width, -- Image width
-        h = height -- Image height
-    }
-
-    local control_str = build_control_string(control)
-    local chunks = get_chunked(base64_data)
-    send_image_chunks(control_str, chunks, x, y)
+    vim.defer_fn(function()
+        if M.current_winid ~= winid then
+            return
+        end
+        draw_image(base64_data, width, height, winid, float_row, float_col, float_width, float_height)
+    end, 20)
     if focus then
         M.manager_winid = winid
         M.manager_bufid = bufnr
@@ -343,16 +492,25 @@ local function redraw_image()
     end
 
     local pos = M.current_float_pos
-    local x, y = get_image_position(pos.row, pos.col, pos.width, pos.height, M.current_image_width, M.current_image_height)
-
-    local control = {
-        a = "T", f = 100, t = "d", q = 2, i = 1, C = 1,
-        w = M.current_image_width, h = M.current_image_height
-    }
-
-    local control_str = build_control_string(control)
-    local chunks = get_chunked(M.current_image_data)
-    send_image_chunks(control_str, chunks, x, y)
+    local winid = pos.winid
+    if not winid or not api.nvim_win_is_valid(winid) then
+        return
+    end
+    vim.defer_fn(function()
+        if not api.nvim_win_is_valid(winid) then
+            return
+        end
+        draw_image(
+            M.current_image_data,
+            M.current_image_width,
+            M.current_image_height,
+            winid,
+            pos.row,
+            pos.col,
+            pos.width,
+            pos.height
+        )
+    end, 20)
 end
 
 -- Setup global autocmds for VimLeave (run once at module load)
@@ -368,22 +526,42 @@ local function setup_global_autocmds()
         end
     })
 
-    -- Handle tmux window switching - clear on focus lost
+    -- Handle window switching - clear on focus lost
     api.nvim_create_autocmd("FocusLost", {
         group = group,
         callback = function()
+            M.image_needs_redraw = true
             clear_image(1)
         end
     })
 
-    -- Restore image on focus gained
-    api.nvim_create_autocmd("FocusGained", {
+    local function maybe_redraw_image()
+        if not M.image_needs_redraw then
+            return
+        end
+        if M.current_winid and api.nvim_win_is_valid(M.current_winid) then
+            vim.defer_fn(function()
+                redraw_image()
+                M.image_needs_redraw = false
+            end, 50)
+        end
+    end
+
+    -- Restore image on focus gained or user interaction
+    api.nvim_create_autocmd({"FocusGained", "WinEnter", "BufEnter", "CursorMoved", "CursorMovedI", "VimResume"}, {
+        group = group,
+        callback = function()
+            maybe_redraw_image()
+        end
+    })
+
+    api.nvim_create_autocmd({"WinEnter", "BufEnter", "VimResume"}, {
         group = group,
         callback = function()
             if M.current_winid and api.nvim_win_is_valid(M.current_winid) then
                 vim.defer_fn(function()
                     redraw_image()
-                end, 50)
+                end, 120)
             end
         end
     })

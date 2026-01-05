@@ -61,12 +61,15 @@ class PyrolaPlugin:
             self._disconnect_client()
             return False
 
-    def _handle_kernel_message(self):
+    def _handle_kernel_message(self, msg_id=None):
         """Handle messages from the kernel."""
         try:
             msg = self.client.get_iopub_msg(timeout=1)
         except Exception as exc:
             print(f"Message handling error: {exc}")
+            return None
+
+        if msg_id and msg.get("parent_header", {}).get("msg_id") != msg_id:
             return None
 
         msg_type = msg.get("msg_type")
@@ -99,11 +102,11 @@ class PyrolaPlugin:
             if not self._connect_kernel(connection_file):
                 return "Error: Failed to connect to kernel"
 
-            self.client.execute(code)
+            msg_id = self.client.execute(code)
 
             outputs = []
             while True:
-                msg = self._handle_kernel_message()
+                msg = self._handle_kernel_message(msg_id)
                 if msg == "IDLE":
                     break
                 if msg is not None:

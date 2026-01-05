@@ -80,6 +80,26 @@ def _extract_image_data(value):
     return ""
 
 
+def _read_env_int(name, default):
+    value = os.environ.get(name)
+    try:
+        value = int(value)
+    except Exception:
+        return default
+    return value if value > 0 else default
+
+
+def _read_env_float(name, default):
+    value = os.environ.get(name)
+    try:
+        value = float(value)
+    except Exception:
+        return default
+    if value <= 0:
+        return default
+    return min(value, 1.0)
+
+
 class ReplInterpreter:
     def __init__(self, connection_file: Optional[str] = None, lan: str = None):
         self.buffer: List[str] = []
@@ -91,6 +111,10 @@ class ReplInterpreter:
         self._interrupt_requested = False
         self._image_debug = os.environ.get("PYROLA_IMAGE_DEBUG", "0") == "1"
         self._auto_indent = os.environ.get("PYROLA_AUTO_INDENT", "0") == "1"
+        self._cell_width = _read_env_int("PYROLA_IMAGE_CELL_WIDTH", 10)
+        self._cell_height = _read_env_int("PYROLA_IMAGE_CELL_HEIGHT", 20)
+        self._image_max_width_ratio = _read_env_float("PYROLA_IMAGE_MAX_WIDTH_RATIO", 0.5)
+        self._image_max_height_ratio = _read_env_float("PYROLA_IMAGE_MAX_HEIGHT_RATIO", 0.5)
         self._temp_paths = set()
         try:
             self._temp_dir = tempfile.TemporaryDirectory(prefix="pyrola-")
@@ -492,8 +516,14 @@ class ReplInterpreter:
                         print(f"Error in Neovim thread: {e}", file=sys.stderr)
                         continue
 
-                    target_width = dimensions["width"] * 10 // 2
-                    target_height = dimensions["height"] * 20 // 2
+                    target_width = max(
+                        1,
+                        int(dimensions["width"] * self._cell_width * self._image_max_width_ratio),
+                    )
+                    target_height = max(
+                        1,
+                        int(dimensions["height"] * self._cell_height * self._image_max_height_ratio),
+                    )
 
                     try:
                         img_bytes = base64.b64decode(payload)
