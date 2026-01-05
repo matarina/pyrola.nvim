@@ -133,7 +133,7 @@ Then, install a Jupyter kernel for each language you want to use.
 **Python Example:**
 
 ```bash
-python3 -m pip install --user ipykernel
+python3 -m pip install ipykernel
 python3 -m ipykernel install --user --name py3
 # Note: The name "py3" must be identical to the name used in 'kernel_map' in your Lua config.
 
