@@ -10,12 +10,7 @@ local M = {
         split_horizen = false,
         split_ratio = 0.65,
         send_buffer_key = "<leader>vb",
-        image_manager_key = "<leader>im",
-        image = {
-            tmux_focus_events = true,
-            tmux_pane_poll = true,
-            tmux_pane_poll_interval = 500
-        }
+        image_manager_key = "<leader>im"
     },
     term = {
         opened = 0,
