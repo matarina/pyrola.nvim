@@ -63,8 +63,8 @@ Add Pyrola to your plugin manager. An example using `lazy.nvim` is provided belo
         python = "py3", -- Jupyter kernel name
         r = "ir",
       },
-      split_horizen = false,
-      split_ratio = 0.65, --width of splited REPL terminal
+      split_horizontal = false,
+      split_ratio = 0.65, -- width of split REPL terminal
       image = {
         cell_width = 10, -- approximate terminal cell width in pixels
         cell_height = 20, -- approximate terminal cell height in pixels

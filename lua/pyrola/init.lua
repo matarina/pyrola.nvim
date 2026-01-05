@@ -7,7 +7,7 @@ local M = {
             r = "ir",
             cpp = "xcpp17"
         },
-        split_horizen = false,
+        split_horizontal = false,
         split_ratio = 0.65,
         image = {
             cell_width = 10,
@@ -171,7 +171,7 @@ local function open_terminal(python_executable)
 
     local bufid = api.nvim_create_buf(false, true)
 
-    if M.config.split_horizen then
+    if M.config.split_horizontal then
         local height = math.floor(vim.o.lines * M.config.split_ratio)
         local split_cmd = "botright " .. height .. "split"
         vim.cmd(split_cmd)
@@ -186,7 +186,7 @@ local function open_terminal(python_executable)
     api.nvim_win_set_buf(0, bufid)
     local winid = api.nvim_get_current_win()
 
-    if M.config.split_horizen then
+    if M.config.split_horizontal then
         vim.wo.winfixheight = true
         vim.wo.winfixwidth = false
     else
@@ -195,7 +195,7 @@ local function open_terminal(python_executable)
     end
 
     local statusline_format = string.format("Kernel: %s  |  Line : %%l ", kernelname)
-    api.nvim_win_set_option(winid, "statusline", statusline_format)
+    vim.wo[winid].statusline = statusline_format
 
     local console_path = get_plugin_path()
 
@@ -381,8 +381,8 @@ end
 
 local function create_pretty_float(content)
     local content_lines = vim.split(content, "\n", {plain = true})
-    local win_width = api.nvim_get_option("columns")
-    local win_height = api.nvim_get_option("lines")
+    local win_width = vim.o.columns
+    local win_height = vim.o.lines
 
     local max_content_width = 0
     for _, line in ipairs(content_lines) do
@@ -417,8 +417,8 @@ local function create_pretty_float(content)
     local bufnr = api.nvim_create_buf(false, true)
     api.nvim_buf_set_lines(bufnr, 0, -1, false, content_lines)
 
-    api.nvim_buf_set_option(bufnr, "modifiable", false)
-    api.nvim_buf_set_option(bufnr, "buftype", "nofile")
+    vim.bo[bufnr].modifiable = false
+    vim.bo[bufnr].buftype = "nofile"
 
     local winid = api.nvim_open_win(bufnr, true, opts)
 
@@ -443,10 +443,11 @@ local function create_pretty_float(content)
         M._inspector_highlights_set = true
     end
 
-    api.nvim_win_set_option(
-        winid,
-        "winhl",
-        string.format("Normal:%s,FloatBorder:%s,FloatTitle:%s", normal_hl, border_hl, title_hl)
+    vim.wo[winid].winhl = string.format(
+        "Normal:%s,FloatBorder:%s,FloatTitle:%s",
+        normal_hl,
+        border_hl,
+        title_hl
     )
 
     local keymap_opts = {noremap = true, silent = true, buffer = bufnr}

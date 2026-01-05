@@ -226,8 +226,8 @@ local function pixels_to_cells(pixels, is_width)
 end
 
 local function create_image_float(image_width, image_height, focus)
-    local win_width = api.nvim_get_option("columns")
-    local win_height = api.nvim_get_option("lines")
+    local win_width = vim.o.columns
+    local win_height = vim.o.lines
 
     -- Convert image pixels to terminal cells
     local width_cells = pixels_to_cells(image_width, true)
@@ -254,8 +254,8 @@ local function create_image_float(image_width, image_height, focus)
     }
 
     local bufnr = api.nvim_create_buf(false, true)
-    api.nvim_buf_set_option(bufnr, "modifiable", false)
-    api.nvim_buf_set_option(bufnr, "buftype", "nofile")
+    vim.bo[bufnr].modifiable = false
+    vim.bo[bufnr].buftype = "nofile"
 
     local winid = api.nvim_open_win(bufnr, focus or false, opts)
 
@@ -291,7 +291,7 @@ local function create_image_float(image_width, image_height, focus)
             normal_hl
         )
     end
-    api.nvim_win_set_option(winid, "winhl", winhl)
+    vim.wo[winid].winhl = winhl
 
     -- Return window info including position for image placement
     return winid, bufnr, row, col, float_width, float_height
