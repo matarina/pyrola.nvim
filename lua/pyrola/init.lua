@@ -1,4 +1,5 @@
 local api, fn, ts = vim.api, vim.fn, vim.treesitter
+local rpc = require("pyrola.rpc")
 
 local M = {
     config = {
@@ -23,7 +24,6 @@ local M = {
         chanid = 0
     },
     send_queue = {},
-    send_flushing = false,
     repl_ready = false
 }
 
@@ -95,7 +95,12 @@ local function register_kernel_cleanup()
         {
             callback = function()
                 if M.filetype and M.connection_file_path then
-                    fn.ShutdownKernel(M.filetype, M.connection_file_path)
+                    if rpc.is_running() then
+                        rpc.request("shutdown_kernel", { connection_file = M.connection_file_path }, 3000)
+                        rpc.stop()
+                    else
+                        pcall(fn.ShutdownKernel, M.filetype, M.connection_file_path)
+                    end
                     os.remove(M.connection_file_path)
                 end
             end,
@@ -105,15 +110,52 @@ local function register_kernel_cleanup()
     M.kernel_cleanup_set = true
 end
 
+local function ensure_server_started()
+    if rpc.is_running() then
+        return true
+    end
+    local python_executable = resolve_python_executable()
+    local plugin_path = get_plugin_path()
+    if not plugin_path then
+        vim.notify("Pyrola: Could not find plugin path.", vim.log.levels.ERROR)
+        return false
+    end
+    if not rpc.start(python_executable, plugin_path) then
+        vim.notify("Pyrola: Failed to start server process.", vim.log.levels.ERROR)
+        return false
+    end
+    return true
+end
+
 local function init_kernel(kernelname)
+    -- Try the new RPC server first
+    if ensure_server_started() then
+        local result, err = rpc.request("init_kernel", { kernel_name = kernelname })
+        if err then
+            if string.find(err, "No such kernel") then
+                vim.notify(
+                    string.format(
+                        "Pyrola: Kernel '%s' not found. Please install it manually (see README) and update setup config.",
+                        kernelname
+                    ),
+                    vim.log.levels.ERROR
+                )
+            else
+                vim.notify(string.format("Pyrola: Kernel initialization failed: %s", err), vim.log.levels.ERROR)
+            end
+            return nil
+        end
+        if result and result.connection_file then
+            return result.connection_file
+        end
+        vim.notify("Pyrola: Kernel initialization failed with empty connection file.", vim.log.levels.ERROR)
+        return nil
+    end
+
+    -- Fallback to legacy remote plugin for users with existing manifest
     local success, result = pcall(fn.InitKernel, kernelname)
     if not success then
-        if string.find(result, "Unknown function") then
-            vim.notify(
-                "Pyrola: Remote plugin not loaded. Run :UpdateRemotePlugins and restart Neovim.",
-                vim.log.levels.ERROR
-            )
-        elseif string.find(result, "No such kernel") then
+        if string.find(result, "No such kernel") then
             vim.notify(
                 string.format(
                     "Pyrola: Kernel '%s' not found. Please install it manually (see README) and update setup config.",
@@ -259,7 +301,12 @@ local function raw_send_message(message)
 
         local function is_continuation(line)
             local trimmed = line:gsub("^%s+", "")
-            return trimmed:match("^(else|elif|except|finally)%f[%w]")
+            for _, kw in ipairs({"else", "elif", "except", "finally"}) do
+                if trimmed:match("^" .. kw .. "%f[^%w]") then
+                    return true
+                end
+            end
+            return false
         end
 
         local out = {}
@@ -320,21 +367,31 @@ local function raw_send_message(message)
     end
 end
 
+local _queue_timeout_timer = nil
+
 local function flush_send_queue()
-    if M.send_flushing then
-        return
-    end
     if not M.repl_ready then
         return
     end
     if #M.send_queue == 0 then
         return
     end
-    M.send_flushing = true
     local next_message = table.remove(M.send_queue, 1)
     M.repl_ready = false
+
+    -- Start a 30-second timeout timer
+    if _queue_timeout_timer then
+        _queue_timeout_timer:stop()
+    end
+    _queue_timeout_timer = vim.defer_fn(function()
+        if not M.repl_ready then
+            vim.notify("Pyrola: REPL ready signal timed out (30s). Resetting send queue.", vim.log.levels.WARN)
+            M.repl_ready = true
+            M.send_queue = {}
+        end
+    end, 30000)
+
     raw_send_message(next_message)
-    M.send_flushing = false
 end
 
 local function send_message(message)
@@ -349,6 +406,10 @@ local function send_message(message)
 end
 
 function M._on_repl_ready()
+    if _queue_timeout_timer then
+        _queue_timeout_timer:stop()
+        _queue_timeout_timer = nil
+    end
     M.repl_ready = true
     flush_send_queue()
 end
@@ -379,30 +440,46 @@ local function get_visual_selection()
     return table.concat(lines, "\n"), end_line
 end
 
-local function create_pretty_float(content)
-    local content_lines = vim.split(content, "\n", {plain = true})
-    local win_width = vim.o.columns
-    local win_height = vim.o.lines
+M._float_highlights_set = {}
+
+local function create_float_window(config)
+    local lines = config.lines or {}
+    local title = config.title or ""
+    local max_width_ratio = config.max_width_ratio or 0.9
+    local max_height_ratio = config.max_height_ratio or 0.9
+    local min_width = config.min_width or 20
+    local min_height = config.min_height or 4
+    local hl_prefix = config.hl_prefix or "PyrolaFloat"
+    local on_content_highlight = config.on_content_highlight
+    local keymaps = config.keymaps or {}
+
+    local term_width = vim.o.columns
+    local term_height = vim.o.lines
 
     local max_content_width = 0
-    for _, line in ipairs(content_lines) do
+    for _, line in ipairs(lines) do
         max_content_width = math.max(max_content_width, fn.strdisplaywidth(line))
     end
 
-    local max_width = math.max(10, math.floor(win_width * 0.9))
-    local max_height = math.max(6, math.floor(win_height * 0.9))
-    local min_width = math.min(20, max_width)
-    local min_height = math.min(4, max_height)
+    local max_width = math.max(10, math.floor(term_width * max_width_ratio))
+    local max_height = math.max(6, math.floor(term_height * max_height_ratio))
+    min_width = math.min(min_width, max_width)
+    min_height = math.min(min_height, max_height)
 
     local width = math.min(max_content_width + 4, max_width)
-    local height = math.min(#content_lines + 2, max_height)
+    local height = math.min(#lines + 2, max_height)
     width = math.max(width, min_width)
     height = math.max(height, min_height)
 
-    local row = math.max(0, math.floor((win_height - height) / 2))
-    local col = math.max(0, math.floor((win_width - width) / 2))
+    local row = math.max(0, math.floor((term_height - height) / 2))
+    local col = math.max(0, math.floor((term_width - width) / 2))
 
-    local opts = {
+    local bufnr = api.nvim_create_buf(false, true)
+    api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+    vim.bo[bufnr].modifiable = false
+    vim.bo[bufnr].buftype = "nofile"
+
+    local winid = api.nvim_open_win(bufnr, true, {
         relative = "editor",
         width = width,
         height = height,
@@ -410,23 +487,20 @@ local function create_pretty_float(content)
         col = col,
         style = "minimal",
         border = "rounded",
-        title = " Inspector ",
+        title = title,
         title_pos = "center"
-    }
+    })
 
-    local bufnr = api.nvim_create_buf(false, true)
-    api.nvim_buf_set_lines(bufnr, 0, -1, false, content_lines)
+    vim.wo[winid].wrap = false
+    vim.wo[winid].sidescrolloff = 5
+    vim.wo[winid].cursorline = true
 
-    vim.bo[bufnr].modifiable = false
-    vim.bo[bufnr].buftype = "nofile"
+    -- Highlight groups
+    local border_hl = hl_prefix .. "Border"
+    local title_hl = hl_prefix .. "Title"
+    local normal_hl = hl_prefix .. "Normal"
 
-    local winid = api.nvim_open_win(bufnr, true, opts)
-
-    local border_hl = "PyrolaInspectorBorder"
-    local title_hl = "PyrolaInspectorTitle"
-    local normal_hl = "PyrolaInspectorNormal"
-
-    if not M._inspector_highlights_set then
+    if not M._float_highlights_set[hl_prefix] then
         local border_target = fn.hlexists("FloatBorder") == 1 and "FloatBorder" or "WinSeparator"
         local title_target = fn.hlexists("FloatTitle") == 1 and "FloatTitle" or "Title"
         local normal_target = fn.hlexists("NormalFloat") == 1 and "NormalFloat" or "Normal"
@@ -440,47 +514,78 @@ local function create_pretty_float(content)
         if fn.hlexists(normal_hl) == 0 then
             api.nvim_set_hl(0, normal_hl, {link = normal_target})
         end
-        M._inspector_highlights_set = true
+        M._float_highlights_set[hl_prefix] = true
     end
 
     vim.wo[winid].winhl = string.format(
         "Normal:%s,FloatBorder:%s,FloatTitle:%s",
-        normal_hl,
-        border_hl,
-        title_hl
+        normal_hl, border_hl, title_hl
     )
 
-    local keymap_opts = {noremap = true, silent = true, buffer = bufnr}
-    vim.keymap.set(
-        "n",
-        "q",
-        function()
-            api.nvim_win_close(winid, true)
-        end,
-        keymap_opts
-    )
-    vim.keymap.set(
-        "n",
-        "<Esc>",
-        function()
-            api.nvim_win_close(winid, true)
-        end,
-        keymap_opts
-    )
+    -- Content-specific highlights
+    if on_content_highlight then
+        local ns = api.nvim_create_namespace("pyrola_" .. hl_prefix)
+        on_content_highlight(bufnr, ns, lines)
+    end
 
+    -- Default keymaps
+    local keymap_opts = {noremap = true, silent = true, nowait = true, buffer = bufnr}
+    vim.keymap.set("n", "q", function() api.nvim_win_close(winid, true) end, keymap_opts)
+    vim.keymap.set("n", "<Esc>", function() api.nvim_win_close(winid, true) end, keymap_opts)
     vim.keymap.set("n", "j", "gj", keymap_opts)
     vim.keymap.set("n", "k", "gk", keymap_opts)
     vim.keymap.set("n", "<C-d>", "<C-d>zz", keymap_opts)
     vim.keymap.set("n", "<C-u>", "<C-u>zz", keymap_opts)
     vim.keymap.set("n", "<C-f>", "<C-f>zz", keymap_opts)
     vim.keymap.set("n", "<C-b>", "<C-b>zz", keymap_opts)
+    vim.keymap.set("n", "H", "zH", keymap_opts)
+    vim.keymap.set("n", "L", "zL", keymap_opts)
+    vim.keymap.set("n", "0", "0", keymap_opts)
+    vim.keymap.set("n", "$", "$", keymap_opts)
+
+    -- Additional keymaps
+    for _, km in ipairs(keymaps) do
+        vim.keymap.set(km.mode or "n", km.lhs, km.rhs, keymap_opts)
+    end
 
     api.nvim_set_current_win(winid)
-
     return winid, bufnr
 end
 
+local function create_pretty_float(content)
+    local content_lines = vim.split(content, "\n", {plain = true})
+
+    return create_float_window({
+        lines = content_lines,
+        title = " Inspector ",
+        hl_prefix = "PyrolaInspector",
+        on_content_highlight = function(bufnr, ns, lines)
+            for i, line in ipairs(lines) do
+                local lrow = i - 1
+                if line:match("^═") or line:match("^─") or line:match("^╔") or line:match("^╚") or line:match("^║$") then
+                    api.nvim_buf_add_highlight(bufnr, ns, "Comment", lrow, 0, -1)
+                elseif line:match("^%u[%u%s]+$") or line:match("^%[.*%]$") then
+                    api.nvim_buf_add_highlight(bufnr, ns, "Title", lrow, 0, -1)
+                else
+                    local start_pos = line:find("║")
+                    if start_pos then
+                        api.nvim_buf_add_highlight(bufnr, ns, "Comment", lrow, start_pos - 1, start_pos + #"║" - 1)
+                    end
+                    local attr_end = line:find(":%s")
+                    if attr_end then
+                        api.nvim_buf_add_highlight(bufnr, ns, "Identifier", lrow, 0, attr_end - 1)
+                    end
+                end
+            end
+        end
+    })
+end
+
 local function check_and_install_dependencies(python_executable)
+    if M._deps_checked then
+        return true
+    end
+
     python_executable = python_executable or resolve_python_executable()
 
     if fn.executable(python_executable) == 0 then
@@ -490,7 +595,7 @@ local function check_and_install_dependencies(python_executable)
     local check_cmd = {
         python_executable,
         "-c",
-        "import pynvim, jupyter_client, prompt_toolkit, PIL, pygments"
+        "import jupyter_client, prompt_toolkit, PIL, pygments"
     }
 
     fn.system(check_cmd)
@@ -515,69 +620,23 @@ local function check_and_install_dependencies(python_executable)
             1
         )
         if choice == 1 then
-            local bufnr = api.nvim_create_buf(false, true)
-            api.nvim_buf_set_lines(bufnr, 0, -1, false, {"Installing dependencies..."})
+            vim.notify("Pyrola: Installing dependencies...", vim.log.levels.INFO)
 
-            local width = math.floor(vim.o.columns * 0.6)
-            local height = math.floor(vim.o.lines * 0.4)
-            local winid = api.nvim_open_win(bufnr, false, {
-                relative = "editor",
-                width = width,
-                height = height,
-                row = math.floor((vim.o.lines - height) / 2),
-                col = math.floor((vim.o.columns - width) / 2),
-                style = "minimal",
-                border = "rounded",
-                title = " Installing Dependencies ",
-                title_pos = "center"
-            })
-
-            local error_lines = {}
-
-            local pip_args = {python_executable, "-m", "pip", "install"}
-            table.insert(pip_args, "pynvim")
-            table.insert(pip_args, "jupyter-client")
-            table.insert(pip_args, "prompt-toolkit")
-            table.insert(pip_args, "pillow")
-            table.insert(pip_args, "pygments")
+            local pip_args = {
+                python_executable, "-m", "pip", "install",
+                "jupyter-client", "prompt-toolkit", "pillow", "pygments",
+            }
 
             fn.jobstart(pip_args, {
-                stdout_buffered = false,
-                stderr_buffered = false,
-                on_stdout = function(_, data)
-                    if data then
-                        vim.schedule(function()
-                                    for _, line in ipairs(data) do
-                                        if line ~= "" then
-                                            api.nvim_buf_set_lines(bufnr, -1, -1, false, {line})
-                                        end
-                                    end
-                                end)
-                            end
-                end,
-                on_stderr = function(_, data)
-                    if data then
-                        vim.schedule(function()
-                                    for _, line in ipairs(data) do
-                                        if line ~= "" then
-                                            table.insert(error_lines, line)
-                                            api.nvim_buf_set_lines(bufnr, -1, -1, false, {line})
-                                        end
-                                    end
-                                end)
-                            end
-                end,
+                stdout_buffered = true,
+                stderr_buffered = true,
                 on_exit = function(_, return_val)
                     vim.schedule(function()
-                        if api.nvim_win_is_valid(winid) then
-                            api.nvim_win_close(winid, true)
-                        end
                         if return_val == 0 then
-                            vim.cmd("UpdateRemotePlugins")
-                            vim.notify("Pyrola: Dependencies installed and remote plugins updated. Please restart Neovim.", vim.log.levels.INFO)
+                            vim.notify("Pyrola: Dependencies installed. Run :Pyrola init again.", vim.log.levels.INFO)
                         else
                             vim.notify(string.format(
-                                "Pyrola: Failed to install dependencies (exit code: %d)\nPython: %s\nCheck output above for details.",
+                                "Pyrola: Failed to install dependencies (exit code: %d). Python: %s",
                                 return_val, python_executable), vim.log.levels.ERROR)
                         end
                     end)
@@ -586,6 +645,7 @@ local function check_and_install_dependencies(python_executable)
         end
         return false
     end
+    M._deps_checked = true
     return true
 end
 
@@ -689,12 +749,27 @@ function M.inspect()
         return
     end
 
-    local ok, result = pcall(fn.ExecuteKernelCode, M.filetype, M.connection_file_path, obj)
-    if not ok then
-        vim.notify(string.format("Pyrola: Inspect failed: %s", result), vim.log.levels.ERROR)
-        return
+    local result, err
+    if rpc.is_running() then
+        result, err = rpc.request("execute_code", {
+            filetype = M.filetype,
+            connection_file = M.connection_file_path,
+            inspected_variable = obj,
+        })
+        if err then
+            vim.notify(string.format("Pyrola: Inspect failed: %s", err), vim.log.levels.ERROR)
+            return
+        end
+        result = tostring(result and result.output or ""):gsub("\\n", "\n")
+    else
+        local ok
+        ok, result = pcall(fn.ExecuteKernelCode, M.filetype, M.connection_file_path, obj)
+        if not ok then
+            vim.notify(string.format("Pyrola: Inspect failed: %s", result), vim.log.levels.ERROR)
+            return
+        end
+        result = tostring(result or ""):gsub("\\n", "\n")
     end
-    result = tostring(result or ""):gsub("\\n", "\n")
     create_pretty_float(result)
 end
 
@@ -865,6 +940,114 @@ function M.send_statement_definition()
     end
     api.nvim_set_current_win(winid)
     move_cursor_to_next_line(end_row)
+end
+
+function M.interrupt_kernel()
+    -- Send SIGINT to kernel process via KernelManager (most reliable)
+    if rpc.is_running() then
+        rpc.request("interrupt_kernel", {}, 2000)
+    else
+        pcall(fn.InterruptKernel)
+    end
+    -- Also send Ctrl-C to the terminal so prompt_toolkit handles it
+    if M.term.opened == 1 and M.term.chanid ~= 0 then
+        api.nvim_chan_send(M.term.chanid, "\x03")
+    end
+end
+
+function M.show_globals()
+    if not repl_ready() then
+        return
+    end
+    M.filetype = vim.bo.filetype
+
+    local result, err
+    if rpc.is_running() then
+        result, err = rpc.request("list_globals", {
+            filetype = M.filetype,
+            connection_file = M.connection_file_path,
+        })
+        if err then
+            vim.notify(string.format("Pyrola: Failed to list globals: %s", err), vim.log.levels.ERROR)
+            return
+        end
+        result = tostring(result and result.output or ""):gsub("\\n", "\n")
+    else
+        local ok
+        ok, result = pcall(fn.ListKernelGlobals, M.filetype, M.connection_file_path)
+        if not ok then
+            vim.notify(string.format("Pyrola: Failed to list globals: %s", result), vim.log.levels.ERROR)
+            return
+        end
+        result = tostring(result or ""):gsub("\\n", "\n")
+    end
+    local content_lines = vim.split(result, "\n", {plain = true})
+
+    create_float_window({
+        lines = content_lines,
+        title = " Variables ",
+        hl_prefix = "PyrolaGlobals",
+        on_content_highlight = function(bufnr, ns, lines)
+            for i, line in ipairs(lines) do
+                local lrow = i - 1
+                if i == 1 then
+                    api.nvim_buf_add_highlight(bufnr, ns, "Title", lrow, 0, -1)
+                elseif line:match("^─") or line:match("^━") or line:match("^╌") then
+                    api.nvim_buf_add_highlight(bufnr, ns, "Comment", lrow, 0, -1)
+                elseif i > 2 then
+                    -- Highlight the type column (second column)
+                    local name_end = line:find("%s%s")
+                    if name_end then
+                        local rest = line:sub(name_end)
+                        local type_start_offset = rest:find("%S")
+                        if type_start_offset then
+                            local abs_type_start = name_end + type_start_offset - 2
+                            local type_rest = line:sub(abs_type_start + 1)
+                            local type_end_offset = type_rest:find("%s%s")
+                            if type_end_offset then
+                                api.nvim_buf_add_highlight(bufnr, ns, "Type", lrow, abs_type_start, abs_type_start + type_end_offset - 1)
+                            end
+                        end
+                    end
+                end
+            end
+        end,
+        keymaps = {
+            {
+                mode = "n",
+                lhs = "<CR>",
+                rhs = function()
+                    local line = api.nvim_get_current_line()
+                    local var_name = line:match("^(%S+)")
+                    if not var_name or var_name == "Name" or var_name:match("^─") then
+                        return
+                    end
+                    local inspect_result, inspect_err
+                    if rpc.is_running() then
+                        inspect_result, inspect_err = rpc.request("execute_code", {
+                            filetype = M.filetype,
+                            connection_file = M.connection_file_path,
+                            inspected_variable = var_name,
+                        })
+                        if inspect_err then
+                            vim.notify(string.format("Pyrola: Inspect failed: %s", inspect_err), vim.log.levels.ERROR)
+                            return
+                        end
+                        inspect_result = tostring(inspect_result and inspect_result.output or ""):gsub("\\n", "\n")
+                    else
+                        local inspect_ok
+                        inspect_ok, inspect_result = pcall(fn.ExecuteKernelCode, M.filetype, M.connection_file_path, var_name)
+                        if not inspect_ok then
+                            vim.notify(string.format("Pyrola: Inspect failed: %s", inspect_result), vim.log.levels.ERROR)
+                            return
+                        end
+                        inspect_result = tostring(inspect_result or ""):gsub("\\n", "\n")
+                    end
+                    create_pretty_float(inspect_result)
+                end
+            }
+        }
+    })
 end
 
 -- Image history functions

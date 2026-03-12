@@ -8,7 +8,14 @@ import time
 import pynvim
 from jupyter_client import BlockingKernelClient, KernelManager
 
-from vari_inspector import get_python_inspector, get_r_inspector
+from vari_inspector import (
+    get_python_inspector,
+    get_python_inspector_call,
+    get_r_inspector,
+    get_r_inspector_call,
+    get_python_globals_list,
+    get_r_globals_list,
+)
 
 
 @pynvim.plugin
@@ -17,6 +24,8 @@ class PyrolaPlugin:
         self.nvim = nvim
         self.kernel_manager = None
         self.client = None
+        self._connection_file = None
+        self._inspector_initialized = set()
 
     def _disconnect_client(self):
         if not self.client:
@@ -25,7 +34,11 @@ class PyrolaPlugin:
             self.client.stop_channels()
         except Exception:
             pass
+        # Clear inspector flag so the next connection re-initializes it.
+        if self._connection_file:
+            self._inspector_initialized.discard(self._connection_file)
         self.client = None
+        self._connection_file = None
 
     @pynvim.function("InitKernel", sync=True)
     def init_kernel(self, args):
@@ -40,6 +53,7 @@ class PyrolaPlugin:
             self.kernel_manager.start_kernel()
             self.client = self.kernel_manager.client()
             self.client.start_channels()
+            self._connection_file = self.kernel_manager.connection_file
             return self.kernel_manager.connection_file
         except Exception as exc:
             self.nvim.err_write(f"Kernel initialization failed: {exc}\n")
@@ -47,7 +61,10 @@ class PyrolaPlugin:
             return None
 
     def _connect_kernel(self, connection_file):
-        """Connect to the Jupyter kernel using the connection file."""
+        """Return a live client for connection_file, reusing the cached one if possible."""
+        if self.client is not None and self._connection_file == connection_file:
+            return True
+        self._disconnect_client()
         try:
             with open(connection_file, "r", encoding="utf-8") as file_handle:
                 connection_info = json.load(file_handle)
@@ -55,6 +72,7 @@ class PyrolaPlugin:
             self.client = BlockingKernelClient()
             self.client.load_connection_info(connection_info)
             self.client.start_channels()
+            self._connection_file = connection_file
             return True
         except Exception as exc:
             print(f"Connection error: {exc}")
@@ -83,6 +101,17 @@ class PyrolaPlugin:
             return "IDLE"
         return None
 
+    def _collect_outputs(self, msg_id):
+        """Drive the message loop until IDLE and return collected output lines."""
+        outputs = []
+        while True:
+            msg = self._handle_kernel_message(msg_id)
+            if msg == "IDLE":
+                break
+            if msg is not None:
+                outputs.append(msg)
+        return outputs
+
     @pynvim.function("ExecuteKernelCode", sync=True)
     def execute_code(self, args):
         """Execute code in the Jupyter kernel."""
@@ -92,9 +121,15 @@ class PyrolaPlugin:
         filetype, connection_file, inspected_variable = args
 
         if filetype == "python":
-            code = get_python_inspector(inspected_variable)
+            if connection_file in self._inspector_initialized:
+                code = get_python_inspector_call(inspected_variable)
+            else:
+                code = get_python_inspector(inspected_variable)
         elif filetype == "r":
-            code = get_r_inspector(inspected_variable)
+            if connection_file in self._inspector_initialized:
+                code = get_r_inspector_call(inspected_variable)
+            else:
+                code = get_r_inspector(inspected_variable)
         else:
             return "Error: unsupported kernel"
 
@@ -103,21 +138,50 @@ class PyrolaPlugin:
                 return "Error: Failed to connect to kernel"
 
             msg_id = self.client.execute(code)
-
-            outputs = []
-            while True:
-                msg = self._handle_kernel_message(msg_id)
-                if msg == "IDLE":
-                    break
-                if msg is not None:
-                    outputs.append(msg)
-
+            outputs = self._collect_outputs(msg_id)
+            self._inspector_initialized.add(connection_file)
             return "\n".join(outputs) if outputs else "No output received"
         except Exception as exc:
-            print(f"Execution error: {exc}")
-            return f"Execution error: {exc}"
-        finally:
             self._disconnect_client()
+            return f"Execution error: {exc}"
+
+    @pynvim.function("ListKernelGlobals", sync=True)
+    def list_kernel_globals(self, args):
+        """List all global variables in the kernel."""
+        if len(args) < 2:
+            return "Error: missing arguments"
+
+        filetype, connection_file = args
+
+        if filetype == "python":
+            code = get_python_globals_list()
+        elif filetype == "r":
+            code = get_r_globals_list()
+        else:
+            return "Error: unsupported kernel"
+
+        try:
+            if not self._connect_kernel(connection_file):
+                return "Error: Failed to connect to kernel"
+
+            msg_id = self.client.execute(code)
+            outputs = self._collect_outputs(msg_id)
+            return "\n".join(outputs) if outputs else "(no user variables)"
+        except Exception as exc:
+            self._disconnect_client()
+            return f"Execution error: {exc}"
+
+    @pynvim.function("InterruptKernel", sync=True)
+    def interrupt_kernel(self, args):
+        """Interrupt the running kernel via SIGINT."""
+        if self.kernel_manager:
+            try:
+                self.kernel_manager.interrupt_kernel()
+                return True
+            except Exception as exc:
+                self.nvim.err_write(f"Failed to interrupt kernel: {exc}\n")
+                return False
+        return False
 
     @pynvim.function("ShutdownKernel", sync=True)
     def shutdown_kernel(self, args):
@@ -130,10 +194,8 @@ class PyrolaPlugin:
             if not self._connect_kernel(connection_file):
                 return False
 
-            # Send shutdown request
             self.client.shutdown()
 
-            # Wait for confirmation (optional, but recommended)
             timeout = 0.2
             start_time = time.time()
             while time.time() - start_time < timeout:

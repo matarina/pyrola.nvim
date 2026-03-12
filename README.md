@@ -39,10 +39,14 @@ Since Pyrola is built on Jupyter kernels, **any language** with a Jupyter kernel
 - **Environment Variable Inspector**: Facilitate debugging by inspecting environment variables and checking their attributes (class, type) directly within the REPL (currently only Python and R are supported).
  ![recording_2026-01-04_07-36-08 - frame at 0m52s](https://github.com/user-attachments/assets/c6668a17-da69-4ae5-ba88-841ec9f3f059)
 
-- **Image Viewer**: Preview image outputs with high resolution (via the Kitty image protocol) or rough resolution (Unicode/ASCII based), providing a quick visual reference without the need for external viewers.
+- **Global Variable Browser**: View all user globals in a dedicated floating window and press `<CR>` on any variable to inspect it instantly.
+
+- **Image Viewer**: Preview image outputs in a floating window via terminal image protocols (Kitty or iTerm2), providing a quick visual reference without opening external viewers.
   ![recording_2026-01-04_07-36-08 - frame at 0m40s](https://github.com/user-attachments/assets/7ad7400c-f251-452b-879f-e9bd39d4f791)
 
 - **History Image Viewer**: Stores historical images and allows browsing previously plotted images in a Neovim floating window.
+
+- **Reliable Interrupts**: Interrupt long-running cells from Neovim and recover cleanly.
 
 ## Installation
 
@@ -54,7 +58,11 @@ Add Pyrola to your plugin manager. An example using `lazy.nvim` is provided belo
 {
   "matarina/pyrola.nvim",
   dependencies = { "nvim-treesitter/nvim-treesitter" },
-  build = ":UpdateRemotePlugins",
+  build = function()
+    -- Optional: pre-install Python dependencies so :Pyrola init works immediately
+    vim.fn.system({ vim.g.python3_host_prog or "python3", "-m", "pip", "install",
+      "jupyter-client", "prompt-toolkit", "pillow", "pygments" })
+  end,
   config = function()
     local pyrola = require("pyrola")
 
@@ -72,6 +80,7 @@ Add Pyrola to your plugin manager. An example using `lazy.nvim` is provided belo
         max_height_ratio = 0.5, -- image height as a fraction of editor lines
         offset_row = 0, -- adjust image row position (cells)
         offset_col = 0, -- adjust image col position (cells)
+        protocol = "auto", -- auto | kitty | iterm2 | none
       },
     })
 
@@ -95,6 +104,16 @@ Add Pyrola to your plugin manager. An example using `lazy.nvim` is provided belo
     -- Inspect variable under cursor
     vim.keymap.set("n", "<leader>is", function()
       pyrola.inspect()
+    end, { noremap = true })
+
+    -- Show globals list (press <CR> on an entry to inspect)
+    vim.keymap.set("n", "<leader>ig", function()
+      pyrola.show_globals()
+    end, { noremap = true })
+
+    -- Interrupt running kernel code
+    vim.keymap.set("n", "<leader>ik", function()
+      pyrola.interrupt_kernel()
     end, { noremap = true })
 
     -- Open history image viewer
@@ -132,16 +151,19 @@ vim.api.nvim_set_hl(0, "PyrolaInspectorNormal", { link = "NormalFloat" })
 vim.api.nvim_set_hl(0, "PyrolaImageBorder", { link = "FloatBorder" })
 vim.api.nvim_set_hl(0, "PyrolaImageTitle", { link = "FloatTitle" })
 vim.api.nvim_set_hl(0, "PyrolaImageNormal", { link = "NormalFloat" })
+vim.api.nvim_set_hl(0, "PyrolaGlobalsBorder", { link = "FloatBorder" })
+vim.api.nvim_set_hl(0, "PyrolaGlobalsTitle", { link = "FloatTitle" })
+vim.api.nvim_set_hl(0, "PyrolaGlobalsNormal", { link = "NormalFloat" })
 ```
 
 ### 2) Python + Pip in PATH
 
-Pyrola is built on `pynvim`, so ensure `python` and `pip` are available in your PATH. Virtual environments (like Conda) are highly recommended.
+Ensure `python` and `pip` are available in your PATH. Virtual environments (like Conda) are highly recommended.
 
-after setting up your `init.lua` and then activate a Conda environment,  Pyrola will automatically prompt you to install the related Python dependencies when first time run 'Pyrola init',. Alternatively, you can install them manually:
+Pyrola no longer requires `:UpdateRemotePlugins` or a Neovim restart. After setting up your `init.lua` and activating a Conda environment, Pyrola will automatically prompt you to install the related Python dependencies when you first run `:Pyrola init`. Alternatively, you can install them manually:
 
 ```bash
-python3 -m pip install pynvim jupyter-client prompt-toolkit pillow pygments
+python3 -m pip install jupyter-client prompt-toolkit pillow pygments
 
 ```
 
@@ -165,8 +187,8 @@ For other languages, install their Jupyter kernels and use the kernel name in `k
 
 Pyrola can render images inside the REPL.
 
-* For **high-quality image viewing**, the [Kitty terminal](https://sw.kovidgoyal.net/kitty/) is necessary.
-* For **embedded pixel image viewing** in the REPL console, [timg](https://github.com/hzeller/timg) is required.
+* Floating image window protocols: **Kitty** and **iTerm2** are supported (`image.protocol = "auto"` detects automatically).
+* For **embedded pixel image viewing** in the REPL console output, [timg](https://github.com/hzeller/timg) is required.
 
 On Debian/Ubuntu:
 
@@ -237,6 +259,29 @@ pyrola.inspect()
 ```
 Currently, Python and R are supported. This is easy to extend, and contributions are welcome!
 
+### Browse Globals
+
+Show all user variables from the current kernel:
+
+```lua
+pyrola.show_globals()
+
+```
+
+In the globals window:
+
+* `<CR>` — inspect selected variable
+* `q` / `<Esc>` — close window
+
+### Interrupt Running Code
+
+Interrupt the active kernel execution:
+
+```lua
+pyrola.interrupt_kernel()
+
+```
+
 
 ### Image History Manager
 
@@ -249,10 +294,6 @@ When focused:
 * `q` — Close
   
 ## TODO
-
-- [ ] **Global variable list**
-  - Display all global variables in a floating window
-  - Support sorting and quick lookup
 
 - [ ] **Multi-language variable inspector**
   - Extend variable inspection beyond Python and R

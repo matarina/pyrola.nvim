@@ -5,13 +5,29 @@ local fn = vim.fn
 local loop = vim.loop
 local is_tmux = os.getenv("TMUX")
 
+-- Detect terminal image protocol
+local function detect_image_protocol()
+    if os.getenv("KITTY_WINDOW_ID") then
+        return "kitty"
+    end
+    local term_program = os.getenv("TERM_PROGRAM") or ""
+    local lc_terminal = os.getenv("LC_TERMINAL") or ""
+    if term_program == "iTerm2" or term_program == "iTerm2.app" or lc_terminal == "iTerm2" then
+        return "iterm2"
+    end
+    return "none"
+end
+
+local image_protocol = detect_image_protocol()
+
 local default_image_config = {
     cell_width = 10,
     cell_height = 20,
     max_width_ratio = 0.5,
     max_height_ratio = 0.5,
     offset_row = 0,
-    offset_col = 0
+    offset_col = 0,
+    protocol = "auto"
 }
 
 local image_config = vim.deepcopy(default_image_config)
@@ -216,6 +232,27 @@ local function send_image_chunks(control_str, chunks, x, y, restore_row, restore
     end
 end
 
+local function get_effective_protocol()
+    local configured = image_config.protocol or "auto"
+    if configured ~= "auto" then
+        return configured
+    end
+    return image_protocol
+end
+
+local function send_iterm2_image(base64_data, width_cells, height_cells, x, y, restore_row, restore_col)
+    local osc = string.format(
+        "\x1b]1337;File=inline=1;width=%dcells;height=%dcells;preserveAspectRatio=1:%s\a",
+        width_cells, height_cells, base64_data
+    )
+    local move = string.format("\x1b[%d;%dH", y, x)
+    local cmd = move .. osc
+    if restore_row and restore_col then
+        cmd = cmd .. string.format("\x1b[%d;%dH", restore_row, restore_col)
+    end
+    write(tmux_wrap(cmd))
+end
+
 local function pixels_to_cells(pixels, is_width)
     local cell_width = tonumber(image_config.cell_width) or default_image_config.cell_width
     local cell_height = tonumber(image_config.cell_height) or default_image_config.cell_height
@@ -258,6 +295,8 @@ local function create_image_float(image_width, image_height, focus)
     vim.bo[bufnr].buftype = "nofile"
 
     local winid = api.nvim_open_win(bufnr, focus or false, opts)
+
+    vim.wo[winid].cursorline = false
 
     -- Set window highlights
     local border_hl = "PyrolaImageBorder"
@@ -321,6 +360,12 @@ end
 
 -- Helper function to clear images
 local function clear_image(image_id)
+    local proto = get_effective_protocol()
+    -- iTerm2 has no explicit image delete command; rely on float window close
+    if proto == "iterm2" then
+        return
+    end
+
     local control = {
         a = "d", -- Delete action
         d = "i", -- Delete by image ID
@@ -407,31 +452,43 @@ local function draw_image(base64_data, width, height, winid, float_row, float_co
     base_col = base_col + col_offset + col_adjust
     local x, y = get_image_position(base_row, base_col, float_width, float_height, width, height)
 
-    local control = {
-        a = "T", -- Transmit and display
-        f = 100, -- PNG format
-        t = "d", -- Direct transmission
-        q = 2, -- Quiet mode
-        i = 1, -- Image ID
-        C = 1, -- Don't move cursor
-        w = width, -- Image width
-        h = height -- Image height
-    }
-
-    local control_str = build_control_string(control)
-    local chunks = get_chunked(base64_data)
     local restore_row, restore_col = nil, nil
     if cursor_row and cursor_col then
         restore_row = cursor_row + row_offset
         restore_col = cursor_col + col_offset
     end
-    send_image_chunks(control_str, chunks, x, y, restore_row, restore_col)
+
+    local proto = get_effective_protocol()
+    if proto == "iterm2" then
+        local width_cells = pixels_to_cells(width, true)
+        local height_cells = pixels_to_cells(height, false)
+        send_iterm2_image(base64_data, width_cells, height_cells, x, y, restore_row, restore_col)
+    else
+        local control = {
+            a = "T", -- Transmit and display
+            f = 100, -- PNG format
+            t = "d", -- Direct transmission
+            q = 2, -- Quiet mode
+            i = 1, -- Image ID
+            C = 1, -- Don't move cursor
+            w = width, -- Image width
+            h = height -- Image height
+        }
+
+        local control_str = build_control_string(control)
+        local chunks = get_chunked(base64_data)
+        send_image_chunks(control_str, chunks, x, y, restore_row, restore_col)
+    end
 end
 
 local function display_image(base64_data, width, height, record_history, focus, auto_clear)
     refresh_image_config()
     if not stdout then
         vim.notify("Pyrola: Image display disabled (no TTY available).", vim.log.levels.WARN)
+        return
+    end
+    if get_effective_protocol() == "none" then
+        vim.notify("Pyrola: No supported image protocol detected (need Kitty or iTerm2).", vim.log.levels.WARN)
         return
     end
     if type(base64_data) ~= "string" or base64_data == "" then

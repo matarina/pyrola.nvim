@@ -39,7 +39,7 @@ IMAGE_MIME_MAP = {
 IMAGE_MIME_TYPES = tuple(IMAGE_MIME_MAP.keys())
 
 
-def _gradient_ansi_lines(lines, start, end):
+def _gradient_ansi_lines(lines, start, end_color):
     if not lines:
         return ""
     if len(lines) == 1:
@@ -48,9 +48,9 @@ def _gradient_ansi_lines(lines, start, end):
         colors = []
         for idx in range(len(lines)):
             ratio = idx / (len(lines) - 1)
-            r = int(start[0] + (end[0] - start[0]) * ratio)
-            g = int(start[1] + (end[1] - start[1]) * ratio)
-            b = int(start[2] + (end[2] - start[2]) * ratio)
+            r = int(start[0] + (end_color[0] - start[0]) * ratio)
+            g = int(start[1] + (end_color[1] - start[1]) * ratio)
+            b = int(start[2] + (end_color[2] - start[2]) * ratio)
             colors.append((r, g, b))
     colored = []
     for line, (r, g, b) in zip(lines, colors):
@@ -288,7 +288,7 @@ class ReplInterpreter:
             if self._executing:
                 self._interrupt_requested = True
                 try:
-                    self.client.interrupt_kernel()
+                    self._interrupt_kernel()
                 except Exception as e:
                     print(f"\nFailed to interrupt kernel: {e}", file=sys.stderr)
             else:
@@ -299,7 +299,7 @@ class ReplInterpreter:
         return kb
 
     async def interact_async(self, banner: Optional[str] = None):
-        logo_lines = [
+        LOGO_FULL = [
             "██████╗ ██╗   ██╗██████╗  ██████╗ ██╗      █████╗ ",
             "██╔══██╗╚██╗ ██╔╝██╔══██╗██╔═══██╗██║     ██╔══██╗",
             "██████╔╝ ╚████╔╝ ██████╔╝██║   ██║██║     ███████║",
@@ -307,8 +307,23 @@ class ReplInterpreter:
             "██║        ██║   ██║  ██║╚██████╔╝███████╗██║  ██║",
             "╚═╝        ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝",
         ]
-        logo = _gradient_ansi_lines(logo_lines, (255, 196, 107), (255, 108, 0))
-        print_formatted_text(ANSI(logo))
+        LOGO_COMPACT = [
+            "╔═╗╦ ╦╦═╗╔═╗╦  ╔═╗",
+            "╠═╝╚╦╝╠╦╝║ ║║  ╠═╣",
+            "╩   ╩ ╩╚═╚═╝╩═╝╩ ╩",
+        ]
+
+        term_cols = shutil.get_terminal_size().columns
+        if term_cols >= 51:
+            logo_lines = LOGO_FULL
+        elif term_cols >= 21:
+            logo_lines = LOGO_COMPACT
+        else:
+            logo_lines = None
+
+        if logo_lines:
+            logo = _gradient_ansi_lines(logo_lines, (255, 196, 107), (255, 108, 0))
+            print_formatted_text(ANSI(logo))
         print_formatted_text(
             HTML(
                 f"<orange>\n    Welcome to Pyrola! kernel</orange> <ansired>{self.kernelname}</ansired> <orange>initialized!\n</orange>"
@@ -373,6 +388,16 @@ class ReplInterpreter:
                 if (time.time() - tic) > timeout:
                     raise RuntimeError("Kernel didn't respond to kernel_info_request")
 
+    def _interrupt_kernel(self):
+        """Send an interrupt to the running kernel via the control channel."""
+        if hasattr(self.client, "interrupt_kernel"):
+            self.client.interrupt_kernel()
+            return
+        # Send interrupt_request on the control channel's raw zmq socket
+        # (session.send expects a zmq.Socket, not the ZMQSocketChannel wrapper)
+        sock = self.client.control_channel.socket
+        self.client.session.send(sock, "interrupt_request", content={})
+
     def _setup_signal_handlers(self):
         signal.signal(signal.SIGINT, self._signal_handler)
 
@@ -380,7 +405,7 @@ class ReplInterpreter:
         if self._executing:
             self._interrupt_requested = True
             try:
-                self.client.interrupt_kernel()
+                self._interrupt_kernel()
             except Exception as e:
                 print(f"\nFailed to interrupt kernel: {e}", file=sys.stderr)
         else:
@@ -401,6 +426,32 @@ class ReplInterpreter:
             pass
         return "unknown", ""
 
+    async def _drain_until_idle(self, msg_id, timeout=5.0):
+        """After interrupt, wait for the kernel to return to idle and drain messages."""
+        deadline = time.time() + timeout
+        while time.time() < deadline and self.client.is_alive():
+            while self.client.iopub_channel.msg_ready():
+                msg = self.client.get_iopub_msg()
+                msg_type = msg["header"]["msg_type"]
+                parent_id = msg["parent_header"].get("msg_id")
+                if parent_id != msg_id:
+                    continue
+                if msg_type == "status":
+                    self._execution_state = msg["content"]["execution_state"]
+                    if self._execution_state == "idle":
+                        while self.client.shell_channel.msg_ready():
+                            self.client.get_shell_msg()
+                        return
+                elif msg_type == "error":
+                    content = msg["content"]
+                    for frame in content["traceback"]:
+                        print(frame, file=sys.stderr)
+                    sys.stderr.flush()
+            await asyncio.sleep(0.05)
+        # Timeout: drain what we can
+        while self.client.shell_channel.msg_ready():
+            self.client.get_shell_msg()
+
     async def handle_execute(self, code):
 
         self._interrupt_requested = False
@@ -415,8 +466,8 @@ class ReplInterpreter:
         try:
             while self._execution_state != "idle" and self.client.is_alive():
                 if self._interrupt_requested:
-                    print("\nKeyboardInterrupt")
                     self._interrupt_requested = False
+                    await self._drain_until_idle(msg_id)
                     return False
 
                 try:
@@ -428,8 +479,8 @@ class ReplInterpreter:
 
             while self.client.is_alive():
                 if self._interrupt_requested:
-                    print("\nKeyboardInterrupt")
                     self._interrupt_requested = False
+                    await self._drain_until_idle(msg_id)
                     return False
 
                 try:
@@ -725,7 +776,17 @@ class ReplInterpreter:
                             # may prevent timg from detecting it
                             term_size = shutil.get_terminal_size()
                             size_arg = f"-g{term_size.columns}x{term_size.lines}"
-                            subprocess.run(["timg", "-p", "q", size_arg, tmp_path], check=True)
+                            proc = await asyncio.create_subprocess_exec(
+                                "timg", "-p", "q", size_arg, tmp_path,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                            stdout_data, stderr_data = await proc.communicate()
+                            if stdout_data:
+                                sys.stdout.buffer.write(stdout_data)
+                                sys.stdout.flush()
+                            if proc.returncode != 0:
+                                raise subprocess.CalledProcessError(proc.returncode, "timg")
                             if image_mime == "image/png" and self._nvim_address:
                                 self._start_nvim_thread()
                                 self.nvim_queue.put(("image", image_data))
