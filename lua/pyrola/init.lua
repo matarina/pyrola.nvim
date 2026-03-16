@@ -1,8 +1,16 @@
 local api, fn, ts = vim.api, vim.fn, vim.treesitter
 local rpc = require("pyrola.rpc")
 
+local DEPS = {
+    { pip = "jupyter-client", import = "jupyter_client" },
+    { pip = "prompt-toolkit", import = "prompt_toolkit" },
+    { pip = "pillow",         import = "PIL" },
+    { pip = "pygments",       import = "pygments" },
+}
+
 local M = {
     config = {
+        python_path = nil,
         kernel_map = {
             python = "python3",
             r = "ir",
@@ -32,6 +40,12 @@ local function is_vim_nil(value)
 end
 
 local function resolve_python_executable()
+    -- 1. Explicit config option
+    local config_path = M.config.python_path
+    if type(config_path) == "string" and config_path ~= "" then
+        return fn.expand(config_path)
+    end
+    -- 2. Neovim host prog
     local host_prog = vim.g.python3_host_prog
     if is_vim_nil(host_prog) then
         host_prog = nil
@@ -39,19 +53,21 @@ local function resolve_python_executable()
     if type(host_prog) == "string" and host_prog ~= "" then
         return host_prog
     end
+    -- 3. Fallback
     return "python3"
 end
 
 local function validate_python_host()
+    local has_config_path = type(M.config.python_path) == "string" and M.config.python_path ~= ""
     local host_prog = vim.g.python3_host_prog
-    if is_vim_nil(host_prog) then
+    if not has_config_path and is_vim_nil(host_prog) then
         vim.notify(
-            "Pyrola: g:python3_host_prog is v:null. Unset it or set a valid python3 path.",
+            "Pyrola: g:python3_host_prog is v:null. Set python_path in setup() or set a valid g:python3_host_prog.",
             vim.log.levels.ERROR
         )
         return nil
     end
-    if host_prog ~= nil and type(host_prog) ~= "string" then
+    if not has_config_path and host_prog ~= nil and type(host_prog) ~= "string" then
         vim.notify("Pyrola: g:python3_host_prog must be a string path to python3.", vim.log.levels.ERROR)
         return nil
     end
@@ -59,7 +75,7 @@ local function validate_python_host()
     if fn.executable(python_executable) == 0 then
         vim.notify(
             string.format(
-                "Pyrola: python3 executable not found (%s). Set g:python3_host_prog to a valid python3 path.",
+                "Pyrola: python3 executable not found (%s). Set python_path in setup() or g:python3_host_prog.",
                 python_executable
             ),
             vim.log.levels.ERROR
@@ -127,19 +143,73 @@ local function ensure_server_started()
     return true
 end
 
+local function offer_kernel_install(python_executable, kernelname)
+    local filetype = vim.bo.filetype
+    if filetype ~= "python" then
+        vim.notify(
+            string.format(
+                "Pyrola: Kernel '%s' not found. Install the appropriate Jupyter kernel for '%s' and retry.",
+                kernelname, filetype
+            ),
+            vim.log.levels.ERROR
+        )
+        return
+    end
+    local choice = fn.confirm(
+        string.format(
+            "Pyrola: Kernel '%s' not found.\n\nInstall ipykernel and register it now?",
+            kernelname
+        ),
+        "&Yes\n&No",
+        1
+    )
+    if choice ~= 1 then
+        return
+    end
+    vim.notify("Pyrola: Installing ipykernel and registering kernel...", vim.log.levels.INFO)
+    python_executable = python_executable or resolve_python_executable()
+    local pip_args = { python_executable, "-m", "pip", "install", "ipykernel" }
+    fn.jobstart(pip_args, {
+        stdout_buffered = true,
+        stderr_buffered = true,
+        on_exit = function(_, return_val)
+            vim.schedule(function()
+                if return_val ~= 0 then
+                    vim.notify("Pyrola: Failed to install ipykernel.", vim.log.levels.ERROR)
+                    return
+                end
+                local register_args = {
+                    python_executable, "-m", "ipykernel", "install",
+                    "--user", "--name", kernelname
+                }
+                fn.jobstart(register_args, {
+                    stdout_buffered = true,
+                    stderr_buffered = true,
+                    on_exit = function(_, reg_code)
+                        vim.schedule(function()
+                            if reg_code == 0 then
+                                vim.notify(
+                                    string.format("Pyrola: Kernel '%s' registered. Run :Pyrola init to start.", kernelname),
+                                    vim.log.levels.INFO
+                                )
+                            else
+                                vim.notify("Pyrola: Failed to register kernel.", vim.log.levels.ERROR)
+                            end
+                        end)
+                    end
+                })
+            end)
+        end
+    })
+end
+
 local function init_kernel(kernelname)
     -- Try the new RPC server first
     if ensure_server_started() then
         local result, err = rpc.request("init_kernel", { kernel_name = kernelname })
         if err then
             if string.find(err, "No such kernel") then
-                vim.notify(
-                    string.format(
-                        "Pyrola: Kernel '%s' not found. Please install it manually (see README) and update setup config.",
-                        kernelname
-                    ),
-                    vim.log.levels.ERROR
-                )
+                offer_kernel_install(nil, kernelname)
             else
                 vim.notify(string.format("Pyrola: Kernel initialization failed: %s", err), vim.log.levels.ERROR)
             end
@@ -156,13 +226,7 @@ local function init_kernel(kernelname)
     local success, result = pcall(fn.InitKernel, kernelname)
     if not success then
         if string.find(result, "No such kernel") then
-            vim.notify(
-                string.format(
-                    "Pyrola: Kernel '%s' not found. Please install it manually (see README) and update setup config.",
-                    kernelname
-                ),
-                vim.log.levels.ERROR
-            )
+            offer_kernel_install(nil, kernelname)
         else
             vim.notify(string.format("Pyrola: Kernel initialization failed: %s", result), vim.log.levels.ERROR)
         end
@@ -352,15 +416,24 @@ local function raw_send_message(message)
     local prefix = api.nvim_replace_termcodes("<esc>[200~", true, false, true)
     local suffix = api.nvim_replace_termcodes("<esc>[201~", true, false, true)
 
+    local payload
     if M.filetype == "python" then
-        local normalized = normalize_python_message(message)
-        api.nvim_chan_send(M.term.chanid, prefix .. normalized .. suffix .. "\n")
+        payload = prefix .. normalize_python_message(message) .. suffix .. "\n"
     else
-        api.nvim_chan_send(M.term.chanid, prefix .. message .. suffix .. "\n")
+        payload = prefix .. message .. suffix .. "\n"
+    end
+
+    local ok, err = pcall(api.nvim_chan_send, M.term.chanid, payload)
+    if not ok then
+        vim.notify(string.format("Pyrola: Failed to send to REPL (channel closed): %s", err), vim.log.levels.ERROR)
+        M.term.opened = 0
+        M.term.chanid = 0
+        M.send_queue = {}
+        return
     end
 
     if api.nvim_win_is_valid(M.term.winid) then
-        api.nvim_win_set_cursor(
+        pcall(api.nvim_win_set_cursor,
             M.term.winid,
             {api.nvim_buf_line_count(api.nvim_win_get_buf(M.term.winid)), 0}
         )
@@ -385,7 +458,11 @@ local function flush_send_queue()
     end
     _queue_timeout_timer = vim.defer_fn(function()
         if not M.repl_ready then
-            vim.notify("Pyrola: REPL ready signal timed out (30s). Resetting send queue.", vim.log.levels.WARN)
+            local dropped = #M.send_queue
+            vim.notify(
+                string.format("Pyrola: REPL ready signal timed out (30s). Dropped %d queued message(s).", dropped + 1),
+                vim.log.levels.WARN
+            )
             M.repl_ready = true
             M.send_queue = {}
         end
@@ -581,6 +658,44 @@ local function create_pretty_float(content)
     })
 end
 
+local function build_import_check()
+    local imports = {}
+    for _, dep in ipairs(DEPS) do
+        table.insert(imports, dep.import)
+    end
+    return "import " .. table.concat(imports, ", ")
+end
+
+local function build_pip_packages()
+    local pkgs = {}
+    for _, dep in ipairs(DEPS) do
+        table.insert(pkgs, dep.pip)
+    end
+    return pkgs
+end
+
+local function install_packages(python_executable, packages, on_success_msg, on_fail_msg)
+    local pip_args = { python_executable, "-m", "pip", "install" }
+    for _, pkg in ipairs(packages) do
+        table.insert(pip_args, pkg)
+    end
+    fn.jobstart(pip_args, {
+        stdout_buffered = true,
+        stderr_buffered = true,
+        on_exit = function(_, return_val)
+            vim.schedule(function()
+                if return_val == 0 then
+                    vim.notify(on_success_msg, vim.log.levels.INFO)
+                else
+                    vim.notify(string.format(
+                        "%s (exit code: %d). Python: %s",
+                        on_fail_msg, return_val, python_executable), vim.log.levels.ERROR)
+                end
+            end)
+        end
+    })
+end
+
 local function check_and_install_dependencies(python_executable)
     if M._deps_checked then
         return true
@@ -592,12 +707,7 @@ local function check_and_install_dependencies(python_executable)
         return false
     end
 
-    local check_cmd = {
-        python_executable,
-        "-c",
-        "import jupyter_client, prompt_toolkit, PIL, pygments"
-    }
-
+    local check_cmd = { python_executable, "-c", build_import_check() }
     fn.system(check_cmd)
 
     if vim.v.shell_error ~= 0 then
@@ -621,27 +731,12 @@ local function check_and_install_dependencies(python_executable)
         )
         if choice == 1 then
             vim.notify("Pyrola: Installing dependencies...", vim.log.levels.INFO)
-
-            local pip_args = {
-                python_executable, "-m", "pip", "install",
-                "jupyter-client", "prompt-toolkit", "pillow", "pygments",
-            }
-
-            fn.jobstart(pip_args, {
-                stdout_buffered = true,
-                stderr_buffered = true,
-                on_exit = function(_, return_val)
-                    vim.schedule(function()
-                        if return_val == 0 then
-                            vim.notify("Pyrola: Dependencies installed. Run :Pyrola init again.", vim.log.levels.INFO)
-                        else
-                            vim.notify(string.format(
-                                "Pyrola: Failed to install dependencies (exit code: %d). Python: %s",
-                                return_val, python_executable), vim.log.levels.ERROR)
-                        end
-                    end)
-                end
-            })
+            install_packages(
+                python_executable,
+                build_pip_packages(),
+                "Pyrola: Dependencies installed. Run :Pyrola init again.",
+                "Pyrola: Failed to install dependencies"
+            )
         end
         return false
     end
@@ -662,17 +757,105 @@ local function check_timg_available()
     end
 end
 
+function M.setup_environment()
+    local python_executable = validate_python_host()
+    if not python_executable then
+        return
+    end
+    local filetype = vim.bo.filetype
+    local packages = build_pip_packages()
+    local kernelname = M.config.kernel_map[filetype]
+
+    if filetype == "python" and kernelname then
+        table.insert(packages, "ipykernel")
+    end
+
+    vim.notify("Pyrola: Installing dependencies...", vim.log.levels.INFO)
+
+    local pip_args = { python_executable, "-m", "pip", "install" }
+    for _, pkg in ipairs(packages) do
+        table.insert(pip_args, pkg)
+    end
+
+    fn.jobstart(pip_args, {
+        stdout_buffered = true,
+        stderr_buffered = true,
+        on_exit = function(_, return_val)
+            vim.schedule(function()
+                if return_val ~= 0 then
+                    vim.notify(string.format(
+                        "Pyrola: Failed to install dependencies (exit code: %d). Python: %s",
+                        return_val, python_executable), vim.log.levels.ERROR)
+                    return
+                end
+                if filetype == "python" and kernelname then
+                    vim.notify("Pyrola: Registering kernel...", vim.log.levels.INFO)
+                    local register_args = {
+                        python_executable, "-m", "ipykernel", "install",
+                        "--user", "--name", kernelname
+                    }
+                    fn.jobstart(register_args, {
+                        stdout_buffered = true,
+                        stderr_buffered = true,
+                        on_exit = function(_, reg_code)
+                            vim.schedule(function()
+                                if reg_code == 0 then
+                                    M._deps_checked = true
+                                    vim.notify(
+                                        string.format("Pyrola: Setup complete. Kernel '%s' registered. Run :Pyrola init to start.", kernelname),
+                                        vim.log.levels.INFO
+                                    )
+                                else
+                                    vim.notify("Pyrola: Dependencies installed but kernel registration failed.", vim.log.levels.ERROR)
+                                end
+                            end)
+                        end
+                    })
+                else
+                    M._deps_checked = true
+                    vim.notify("Pyrola: Dependencies installed. Run :Pyrola init to start.", vim.log.levels.INFO)
+                end
+            end)
+        end
+    })
+end
+
+local _pyrola_subcommands = { "init", "setup" }
+
 function M.setup(opts)
     vim.env.PYTHONDONTWRITEBYTECODE = "1"
     M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+    if not M._colorscheme_autocmd then
+        api.nvim_create_autocmd("ColorScheme", {
+            callback = function()
+                M._float_highlights_set = {}
+                local ok, img = pcall(require, "pyrola.image")
+                if ok then
+                    img._image_highlights_set = false
+                end
+            end,
+        })
+        M._colorscheme_autocmd = true
+    end
     if not M.commands_set then
         api.nvim_create_user_command("Pyrola", function(cmd)
             if cmd.args == "init" then
                 M.init()
                 return
             end
-            vim.notify("Pyrola: Unknown command. Try :Pyrola init", vim.log.levels.WARN)
-        end, {nargs = 1})
+            if cmd.args == "setup" then
+                M.setup_environment()
+                return
+            end
+            vim.notify("Pyrola: Unknown command. Try :Pyrola init or :Pyrola setup", vim.log.levels.WARN)
+        end, {
+            nargs = 1,
+            complete = function(arg_lead)
+                return vim.tbl_filter(function(s)
+                    return s:find(arg_lead, 1, true) == 1
+                end, _pyrola_subcommands)
+            end,
+        })
         M.commands_set = true
     end
     return M
@@ -714,29 +897,18 @@ function M.inspect()
 
     M.filetype = vim.bo.filetype
     local obj
-    if ts.get_node then
-        local ok_node, node = pcall(ts.get_node)
-        if ok_node and node then
-            local ok_text, text = pcall(ts.get_node_text, node, 0)
-            if ok_text and text and text ~= "" then
-                obj = text
-            end
-        end
-    end
-    if not obj then
-        local ok_parser, parser = pcall(ts.get_parser, 0)
-        if ok_parser and parser then
-            local tree = parser:parse()[1]
-            if tree then
-                local root = tree:root()
-                local row, col = unpack(api.nvim_win_get_cursor(0))
-                row = row - 1
-                local node = root:named_descendant_for_range(row, col, row, col)
-                if node and node ~= root then
-                    local ok_text, text = pcall(ts.get_node_text, node, 0)
-                    if ok_text and text and text ~= "" then
-                        obj = text
-                    end
+    local ok_parser, parser = pcall(ts.get_parser, 0)
+    if ok_parser and parser then
+        local tree = parser:parse()[1]
+        if tree then
+            local root = tree:root()
+            local row, col = unpack(api.nvim_win_get_cursor(0))
+            row = row - 1
+            local node = root:named_descendant_for_range(row, col, row, col)
+            if node and node ~= root then
+                local ok_text, text = pcall(ts.get_node_text, node, 0)
+                if ok_text and text and text ~= "" then
+                    obj = text
                 end
             end
         end

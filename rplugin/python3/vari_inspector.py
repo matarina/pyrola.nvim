@@ -155,10 +155,7 @@ if 'python_Var_inspector' not in globals():
                 except Exception:
                     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
-            if hasattr(df, "map"):
-                str_df = df.map(format_value)
-            else:
-                str_df = df.applymap(format_value)
+            str_df = df.map(format_value)
 
             col_sep = "  "
             col_widths = {}

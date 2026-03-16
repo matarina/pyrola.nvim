@@ -205,20 +205,23 @@ class ReplInterpreter:
             print("No kernel connection file specified", file=sys.stderr)
             sys.exit(1)
 
-    def _attach_nvim(self, log_failure=False):
+    def _attach_nvim(self, log_failure=False, retries=3, delay=0.5):
         address = self._nvim_address or os.environ.get("NVIM_LISTEN_ADDRESS")
         if not address:
             self.nvim = None
             return False
         self._nvim_address = address
-        try:
-            self.nvim = pynvim.attach("socket", path=address)
-            return True
-        except Exception as e:
-            self.nvim = None
-            if log_failure:
-                print(f"Failed to connect to Neovim: {e}", file=sys.stderr)
-            return False
+        for attempt in range(retries):
+            try:
+                self.nvim = pynvim.attach("socket", path=address)
+                return True
+            except Exception as e:
+                self.nvim = None
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                elif log_failure:
+                    print(f"Failed to connect to Neovim after {retries} attempts: {e}", file=sys.stderr)
+        return False
 
     def _ensure_nvim(self):
         if self.nvim:
@@ -781,7 +784,15 @@ class ReplInterpreter:
                                 stdout=asyncio.subprocess.PIPE,
                                 stderr=asyncio.subprocess.PIPE,
                             )
-                            stdout_data, stderr_data = await proc.communicate()
+                            try:
+                                stdout_data, stderr_data = await asyncio.wait_for(
+                                    proc.communicate(), timeout=15
+                                )
+                            except asyncio.TimeoutError:
+                                proc.kill()
+                                await proc.wait()
+                                print("timg timed out (15s)", file=sys.stderr)
+                                continue
                             if stdout_data:
                                 sys.stdout.buffer.write(stdout_data)
                                 sys.stdout.flush()

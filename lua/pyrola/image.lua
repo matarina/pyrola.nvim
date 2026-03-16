@@ -59,6 +59,8 @@ M.manager_active = false
 M.manager_guicursor = nil
 
 local MAX_HISTORY = 50
+local MAX_HISTORY_BYTES = 50 * 1024 * 1024 -- 50 MB cap
+M._history_bytes = 0
 
 -- Enable tmux passthrough if needed
 local function enable_tmux_passthrough()
@@ -400,10 +402,14 @@ local function cleanup_image()
 end
 
 local function push_history(entry)
-    if #M.history >= MAX_HISTORY then
-        table.remove(M.history, 1)
+    local entry_size = #(entry.data or "")
+    -- Evict oldest entries until under byte cap or count cap
+    while #M.history >= MAX_HISTORY or (M._history_bytes + entry_size > MAX_HISTORY_BYTES and #M.history > 0) do
+        local removed = table.remove(M.history, 1)
+        M._history_bytes = M._history_bytes - #(removed.data or "")
     end
     table.insert(M.history, entry)
+    M._history_bytes = M._history_bytes + entry_size
     M.history_index = #M.history
 end
 

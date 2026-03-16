@@ -85,9 +85,9 @@ class PyrolaServer:
             return "IDLE"
         return None
 
-    def _collect_outputs(self, msg_id):
+    def _collect_outputs(self, msg_id, max_iterations=500):
         outputs = []
-        while True:
+        for _ in range(max_iterations):
             msg = self._handle_kernel_message(msg_id)
             if msg == "IDLE":
                 break
@@ -169,20 +169,20 @@ class PyrolaServer:
         if self.client:
             try:
                 self.client.shutdown()
-                timeout = 0.2
-                start_time = time.time()
-                while time.time() - start_time < timeout:
-                    try:
-                        msg = self.client.get_iopub_msg(timeout=0.5)
-                        if (
-                            msg["msg_type"] == "status"
-                            and msg["content"]["execution_state"] == "dead"
-                        ):
-                            break
-                    except Exception:
-                        pass
             except Exception:
                 pass
+            timeout = 0.5
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                try:
+                    msg = self.client.get_iopub_msg(timeout=0.1)
+                    if (
+                        msg["msg_type"] == "status"
+                        and msg["content"]["execution_state"] == "dead"
+                    ):
+                        break
+                except Exception:
+                    break
 
         if self.kernel_manager:
             try:

@@ -101,10 +101,10 @@ class PyrolaPlugin:
             return "IDLE"
         return None
 
-    def _collect_outputs(self, msg_id):
+    def _collect_outputs(self, msg_id, max_iterations=500):
         """Drive the message loop until IDLE and return collected output lines."""
         outputs = []
-        while True:
+        for _ in range(max_iterations):
             msg = self._handle_kernel_message(msg_id)
             if msg == "IDLE":
                 break
@@ -194,23 +194,29 @@ class PyrolaPlugin:
             if not self._connect_kernel(connection_file):
                 return False
 
-            self.client.shutdown()
+            try:
+                self.client.shutdown()
+            except Exception:
+                pass
 
-            timeout = 0.2
+            timeout = 0.5
             start_time = time.time()
             while time.time() - start_time < timeout:
                 try:
-                    msg = self.client.get_iopub_msg(timeout=0.5)
+                    msg = self.client.get_iopub_msg(timeout=0.1)
                     if (
                         msg["msg_type"] == "status"
                         and msg["content"]["execution_state"] == "dead"
                     ):
                         break
                 except Exception:
-                    pass
+                    break
 
             if self.kernel_manager:
-                self.kernel_manager.shutdown_kernel(now=True)
+                try:
+                    self.kernel_manager.shutdown_kernel(now=True)
+                except Exception:
+                    pass
                 self.kernel_manager = None
 
             return True
