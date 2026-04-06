@@ -16,9 +16,13 @@ import sys
 sys.dont_write_bytecode = True
 
 import json
+import shutil
+import subprocess
 import time
+from pathlib import Path
 
 from jupyter_client import BlockingKernelClient, KernelManager
+from jupyter_client.kernelspec import KernelSpecManager
 
 from vari_inspector import (
     get_python_inspector,
@@ -36,6 +40,224 @@ class PyrolaServer:
         self.client = None
         self._connection_file = None
         self._inspector_initialized = set()
+        self._kernel_spec_manager = KernelSpecManager()
+
+    def _managed_kernel_name(self, filetype):
+        return f"pyrola_{filetype}"
+
+    def _managed_display_name(self, filetype):
+        display_names = {
+            "python": "Pyrola Python",
+            "r": "Pyrola R",
+            "cpp": "Pyrola C++",
+            "julia": "Pyrola Julia",
+        }
+        return display_names.get(filetype, f"Pyrola {filetype}")
+
+    def _run(self, args):
+        proc = subprocess.run(args, capture_output=True, text=True)
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        return proc.returncode, stdout, stderr
+
+    def _find_kernel_specs(self):
+        return self._kernel_spec_manager.find_kernel_specs()
+
+    def _load_kernel_spec(self, name):
+        spec = self._kernel_spec_manager.get_kernel_spec(name)
+        return spec.to_json(), spec.resource_dir
+
+    def _managed_kernel_dir(self, name):
+        return Path(self._kernel_spec_manager.user_kernel_dir) / name
+
+    def _write_kernel_spec(self, name, spec_data, source_dir=None):
+        target_dir = self._managed_kernel_dir(name)
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        if source_dir:
+            for entry in Path(source_dir).iterdir():
+                if entry.name == "kernel.json":
+                    continue
+                dest = target_dir / entry.name
+                if entry.is_dir():
+                    shutil.copytree(entry, dest)
+                else:
+                    shutil.copy2(entry, dest)
+
+        with open(target_dir / "kernel.json", "w", encoding="utf-8") as fh:
+            json.dump(spec_data, fh, indent=1)
+            fh.write("\n")
+
+        return str(target_dir)
+
+    def _clone_kernel_spec(self, source_name, target_name, display_name):
+        spec_data, source_dir = self._load_kernel_spec(source_name)
+        spec_data["display_name"] = display_name
+        metadata = spec_data.get("metadata", {})
+        metadata["pyrola"] = {"managed": True, "source_kernel": source_name}
+        spec_data["metadata"] = metadata
+        self._write_kernel_spec(target_name, spec_data, source_dir=source_dir)
+        return target_name
+
+    def _find_candidate_kernel(self, *, exact=None, prefixes=None, exclude=None):
+        exact = exact or []
+        prefixes = prefixes or []
+        exclude = exclude or set()
+        kernels = self._find_kernel_specs()
+
+        for name in exact:
+            if name in kernels and name not in exclude:
+                return name
+
+        for prefix in prefixes:
+            matches = sorted(name for name in kernels if name.startswith(prefix) and name not in exclude)
+            if matches:
+                return matches[0]
+
+        return None
+
+    def _find_kernel_by_display_name(self, display_name, exclude=None):
+        exclude = exclude or set()
+        for name in sorted(self._find_kernel_specs()):
+            if name in exclude:
+                continue
+            spec_data, _ = self._load_kernel_spec(name)
+            if spec_data.get("display_name") == display_name:
+                return name
+        return None
+
+    def _ensure_python_ipykernel(self):
+        try:
+            import ipykernel  # noqa: F401
+        except Exception:
+            code, _, stderr = self._run([sys.executable, "-m", "pip", "install", "ipykernel"])
+            if code != 0:
+                raise RuntimeError(
+                    f"Failed to install ipykernel for {sys.executable}: {stderr or 'unknown error'}"
+                )
+
+    def _ensure_python_kernel(self, name):
+        self._ensure_python_ipykernel()
+        spec_data = {
+            "argv": [
+                sys.executable,
+                "-m",
+                "ipykernel_launcher",
+                "-f",
+                "{connection_file}",
+            ],
+            "display_name": self._managed_display_name("python"),
+            "language": "python",
+            "metadata": {
+                "debugger": True,
+                "pyrola": {"managed": True, "source_python": sys.executable},
+            },
+        }
+        source_name = self._find_candidate_kernel(exact=["python3"], exclude={name})
+        source_dir = None
+        if source_name:
+            _, source_dir = self._load_kernel_spec(source_name)
+        self._write_kernel_spec(name, spec_data, source_dir=source_dir)
+        return {
+            "kernel_name": name,
+            "display_name": self._managed_display_name("python"),
+            "source": sys.executable,
+        }
+
+    def _ensure_r_kernel(self, name, runtime_command):
+        if not runtime_command:
+            source_name = self._find_candidate_kernel(exact=["ir"], exclude={name})
+            if source_name:
+                self._clone_kernel_spec(source_name, name, self._managed_display_name("r"))
+                return {
+                    "kernel_name": name,
+                    "display_name": self._managed_display_name("r"),
+                    "source": source_name,
+                }
+            raise RuntimeError("R executable not found in PATH; cannot create pyrola_r")
+
+        code, _, stderr = self._run(
+            [
+                runtime_command,
+                "--slave",
+                "-e",
+                "if (!requireNamespace('IRkernel', quietly=TRUE)) quit(status=2); "
+                "IRkernel::installspec(user=TRUE, name='pyrola_r', displayname='Pyrola R')",
+            ]
+        )
+        if code != 0:
+            raise RuntimeError(
+                "Failed to create pyrola_r. Install IRkernel in the active R environment. "
+                f"R: {runtime_command}. Error: {stderr or 'unknown error'}"
+            )
+        return {
+            "kernel_name": name,
+            "display_name": self._managed_display_name("r"),
+            "source": runtime_command,
+        }
+
+    def _ensure_cpp_kernel(self, name):
+        source_name = self._find_candidate_kernel(
+            exact=["xcpp17", "xcpp14", "xcpp11"],
+            prefixes=["xcpp"],
+            exclude={name},
+        )
+        if not source_name:
+            raise RuntimeError(
+                "No C++ Jupyter kernel found. Install xeus-cling so Pyrola can create pyrola_cpp."
+            )
+
+        self._clone_kernel_spec(source_name, name, self._managed_display_name("cpp"))
+        return {
+            "kernel_name": name,
+            "display_name": self._managed_display_name("cpp"),
+            "source": source_name,
+        }
+
+    def _ensure_julia_kernel(self, name):
+        source_name = self._find_candidate_kernel(prefixes=["julia"], exclude={name})
+        if not source_name:
+            raise RuntimeError(
+                "No Julia Jupyter kernel found. Install IJulia so Pyrola can create pyrola_julia."
+            )
+
+        self._clone_kernel_spec(source_name, name, self._managed_display_name("julia"))
+        return {
+            "kernel_name": name,
+            "display_name": self._managed_display_name("julia"),
+            "source": source_name,
+        }
+
+    def _ensure_julia_kernel_from_runtime(self, name, runtime_command):
+        display_name = self._managed_display_name("julia")
+        code, _, stderr = self._run(
+            [
+                runtime_command,
+                "-e",
+                f'using IJulia; installkernel("{display_name}")',
+            ]
+        )
+        if code != 0:
+            raise RuntimeError(
+                "Failed to create a Julia kernel from the active environment. "
+                f"Julia: {runtime_command}. Error: {stderr or 'unknown error'}"
+            )
+
+        source_name = self._find_kernel_by_display_name(display_name, exclude={name})
+        if not source_name:
+            source_name = self._find_candidate_kernel(prefixes=["julia"], exclude={name})
+        if not source_name:
+            raise RuntimeError("IJulia did not register a usable Julia kernelspec.")
+
+        self._clone_kernel_spec(source_name, name, display_name)
+        return {
+            "kernel_name": name,
+            "display_name": display_name,
+            "source": runtime_command,
+        }
 
     def _disconnect_client(self):
         if not self.client:
@@ -96,6 +318,25 @@ class PyrolaServer:
         return outputs
 
     # ── RPC methods ──────────────────────────────────────────────────
+
+    def ensure_managed_kernel(self, params):
+        filetype = params.get("filetype")
+        runtime_command = params.get("runtime_command")
+        if not filetype:
+            raise ValueError("missing filetype")
+
+        name = self._managed_kernel_name(filetype)
+        if filetype == "python":
+            return self._ensure_python_kernel(name)
+        if filetype == "r":
+            return self._ensure_r_kernel(name, runtime_command)
+        if filetype == "cpp":
+            return self._ensure_cpp_kernel(name)
+        if filetype == "julia":
+            if runtime_command:
+                return self._ensure_julia_kernel_from_runtime(name, runtime_command)
+            return self._ensure_julia_kernel(name)
+        raise ValueError(f"unsupported auto-managed kernel: {filetype}")
 
     def init_kernel(self, params):
         kernel_name = params.get("kernel_name")
@@ -197,6 +438,7 @@ class PyrolaServer:
     # ── Dispatch ─────────────────────────────────────────────────────
 
     _methods = {
+        "ensure_managed_kernel": ensure_managed_kernel,
         "init_kernel": init_kernel,
         "execute_code": execute_code,
         "list_globals": list_globals,

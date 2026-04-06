@@ -8,14 +8,22 @@ local DEPS = {
     { pip = "pygments",       import = "pygments" },
 }
 
+local AUTO_KERNEL_NAMES = {
+    python = "pyrola_python",
+    r = "pyrola_r",
+    cpp = "pyrola_cpp",
+    julia = "pyrola_julia",
+}
+
+local RUNTIME_COMMANDS = {
+    r = "R",
+    julia = "julia",
+}
+
 local M = {
     config = {
         python_path = nil,
-        kernel_map = {
-            python = "python3",
-            r = "ir",
-            cpp = "xcpp17"
-        },
+        kernel_map = {},
         split_horizontal = false,
         split_ratio = 0.65,
         image = {
@@ -45,7 +53,12 @@ local function resolve_python_executable()
     if type(config_path) == "string" and config_path ~= "" then
         return fn.expand(config_path)
     end
-    -- 2. Neovim host prog
+    -- 2. Active shell python
+    local shell_python = fn.exepath("python3")
+    if type(shell_python) == "string" and shell_python ~= "" then
+        return shell_python
+    end
+    -- 3. Neovim host prog
     local host_prog = vim.g.python3_host_prog
     if is_vim_nil(host_prog) then
         host_prog = nil
@@ -53,29 +66,16 @@ local function resolve_python_executable()
     if type(host_prog) == "string" and host_prog ~= "" then
         return host_prog
     end
-    -- 3. Fallback
+    -- 4. Fallback
     return "python3"
 end
 
 local function validate_python_host()
-    local has_config_path = type(M.config.python_path) == "string" and M.config.python_path ~= ""
-    local host_prog = vim.g.python3_host_prog
-    if not has_config_path and is_vim_nil(host_prog) then
-        vim.notify(
-            "Pyrola: g:python3_host_prog is v:null. Set python_path in setup() or set a valid g:python3_host_prog.",
-            vim.log.levels.ERROR
-        )
-        return nil
-    end
-    if not has_config_path and host_prog ~= nil and type(host_prog) ~= "string" then
-        vim.notify("Pyrola: g:python3_host_prog must be a string path to python3.", vim.log.levels.ERROR)
-        return nil
-    end
     local python_executable = resolve_python_executable()
     if fn.executable(python_executable) == 0 then
         vim.notify(
             string.format(
-                "Pyrola: python3 executable not found (%s). Set python_path in setup() or g:python3_host_prog.",
+                "Pyrola: python3 executable not found (%s). Set python_path in setup() or ensure python3 is on PATH.",
                 python_executable
             ),
             vim.log.levels.ERROR
@@ -83,6 +83,59 @@ local function validate_python_host()
         return nil
     end
     return python_executable
+end
+
+local function configured_kernel_name(filetype)
+    local kernelname = M.config.kernel_map[filetype]
+    if type(kernelname) == "string" and kernelname ~= "" then
+        return kernelname
+    end
+    return nil
+end
+
+local function auto_kernel_name(filetype)
+    return AUTO_KERNEL_NAMES[filetype]
+end
+
+local function resolve_runtime_command(filetype)
+    local cmd = RUNTIME_COMMANDS[filetype]
+    if not cmd then
+        return nil
+    end
+    local resolved = fn.exepath(cmd)
+    if resolved ~= nil and resolved ~= "" then
+        return resolved
+    end
+    return nil
+end
+
+local function parse_tree_safely()
+    local ok_parser, parser = pcall(ts.get_parser, 0)
+    if not ok_parser or not parser then
+        return nil, "Pyrola: Tree-sitter parser not available for this buffer."
+    end
+
+    local ok_parse, trees = pcall(function()
+        return parser:parse()
+    end)
+    if not ok_parse then
+        return nil, string.format("Pyrola: Tree-sitter parse failed: %s", trees)
+    end
+
+    local tree = trees and trees[1] or nil
+    if not tree then
+        return nil, "Pyrola: Tree-sitter did not return a syntax tree for this buffer."
+    end
+    return tree, nil
+end
+
+local function current_line_message()
+    local row = api.nvim_win_get_cursor(0)[1]
+    local line = api.nvim_buf_get_lines(0, row - 1, row, false)[1] or ""
+    if line:match("^%s*$") then
+        return nil, row
+    end
+    return line, row
 end
 
 local function repl_ready()
@@ -141,6 +194,39 @@ local function ensure_server_started()
         return false
     end
     return true
+end
+
+local function ensure_managed_kernel(filetype)
+    local managed_name = auto_kernel_name(filetype)
+    if not managed_name then
+        return nil, string.format("Pyrola: No auto-managed kernel is defined for filetype '%s'.", filetype)
+    end
+    if not ensure_server_started() then
+        return nil, "Pyrola: Failed to start server process."
+    end
+
+    local params = { filetype = filetype }
+    local runtime_command = resolve_runtime_command(filetype)
+    if runtime_command then
+        params.runtime_command = runtime_command
+    end
+
+    local result, err = rpc.request("ensure_managed_kernel", params, 30000)
+    if err then
+        return nil, err
+    end
+    if not result or not result.kernel_name then
+        return nil, string.format("Pyrola: Failed to resolve managed kernel for '%s'.", filetype)
+    end
+    return result.kernel_name, nil
+end
+
+local function resolve_kernel_name(filetype)
+    local configured = configured_kernel_name(filetype)
+    if configured then
+        return configured, nil
+    end
+    return ensure_managed_kernel(filetype)
 end
 
 local function offer_kernel_install(python_executable, kernelname)
@@ -254,10 +340,9 @@ local function build_repl_env()
     }
 end
 
-local function open_terminal(python_executable)
+local function open_terminal(python_executable, kernelname)
     M.filetype = vim.bo.filetype
     local origin_win = api.nvim_get_current_win()
-    local kernelname = M.config.kernel_map[M.filetype]
     if not kernelname then
         vim.notify(
             string.format("Pyrola: No kernel mapped for filetype '%s'.", M.filetype),
@@ -301,7 +386,7 @@ local function open_terminal(python_executable)
     end
 
     local statusline_format = string.format("Kernel: %s  |  Line : %%l ", kernelname)
-    vim.wo[winid].statusline = statusline_format
+    api.nvim_set_option_value("statusline", statusline_format, {scope = "local", win = winid})
 
     local console_path = get_plugin_path()
 
@@ -764,7 +849,7 @@ function M.setup_environment()
     end
     local filetype = vim.bo.filetype
     local packages = build_pip_packages()
-    local kernelname = M.config.kernel_map[filetype]
+    local kernelname = configured_kernel_name(filetype)
 
     if filetype == "python" and kernelname then
         table.insert(packages, "ipykernel")
@@ -788,7 +873,25 @@ function M.setup_environment()
                         return_val, python_executable), vim.log.levels.ERROR)
                     return
                 end
-                if filetype == "python" and kernelname then
+                if not ensure_server_started() then
+                    vim.notify("Pyrola: Dependencies installed, but the RPC server failed to start.", vim.log.levels.ERROR)
+                    return
+                end
+                if kernelname == nil then
+                    local managed_kernel, err = ensure_managed_kernel(filetype)
+                    if managed_kernel then
+                        M._deps_checked = true
+                        vim.notify(
+                            string.format("Pyrola: Setup complete. Managed kernel '%s' is ready. Run :Pyrola init to start.", managed_kernel),
+                            vim.log.levels.INFO
+                        )
+                    else
+                        vim.notify(
+                            string.format("Pyrola: Dependencies installed but kernel setup failed: %s", err),
+                            vim.log.levels.ERROR
+                        )
+                    end
+                elseif filetype == "python" then
                     vim.notify("Pyrola: Registering kernel...", vim.log.levels.INFO)
                     local register_args = {
                         python_executable, "-m", "ipykernel", "install",
@@ -813,7 +916,10 @@ function M.setup_environment()
                     })
                 else
                     M._deps_checked = true
-                    vim.notify("Pyrola: Dependencies installed. Run :Pyrola init to start.", vim.log.levels.INFO)
+                    vim.notify(
+                        string.format("Pyrola: Dependencies installed. Using explicitly configured kernel '%s'. Run :Pyrola init to start.", kernelname),
+                        vim.log.levels.INFO
+                    )
                 end
             end)
         end
@@ -871,10 +977,10 @@ function M.init()
     end
     check_timg_available()
     local filetype = vim.bo.filetype
-    local kernelname = M.config.kernel_map[filetype]
+    local kernelname, kernel_err = resolve_kernel_name(filetype)
     if not kernelname then
         vim.notify(
-            string.format("Pyrola: No kernel mapped for filetype '%s'. Update setup.kernel_map.", filetype),
+            kernel_err or string.format("Pyrola: No kernel mapped for filetype '%s'. Update setup.kernel_map.", filetype),
             vim.log.levels.WARN
         )
         return
@@ -887,7 +993,21 @@ function M.init()
         M.connection_file_path = connection_file
         register_kernel_cleanup()
     end
-    open_terminal(python_executable)
+    M.active_kernel_name = kernelname
+    open_terminal(python_executable, kernelname)
+end
+
+function M.status()
+    if M.term.opened == 1 and M.term.chanid ~= 0 then
+        if M.repl_ready then
+            return "ready"
+        end
+        return "busy"
+    end
+    if M.connection_file_path then
+        return "kernel"
+    end
+    return "stopped"
 end
 
 function M.inspect()
@@ -897,19 +1017,16 @@ function M.inspect()
 
     M.filetype = vim.bo.filetype
     local obj
-    local ok_parser, parser = pcall(ts.get_parser, 0)
-    if ok_parser and parser then
-        local tree = parser:parse()[1]
-        if tree then
-            local root = tree:root()
-            local row, col = unpack(api.nvim_win_get_cursor(0))
-            row = row - 1
-            local node = root:named_descendant_for_range(row, col, row, col)
-            if node and node ~= root then
-                local ok_text, text = pcall(ts.get_node_text, node, 0)
-                if ok_text and text and text ~= "" then
-                    obj = text
-                end
+    local tree = parse_tree_safely()
+    if tree then
+        local root = tree:root()
+        local row, col = unpack(api.nvim_win_get_cursor(0))
+        row = row - 1
+        local node = root:named_descendant_for_range(row, col, row, col)
+        if node and node ~= root then
+            local ok_text, text = pcall(ts.get_node_text, node, 0)
+            if ok_text and text and text ~= "" then
+                obj = text
             end
         end
     end
@@ -1041,14 +1158,16 @@ function M.send_statement_definition()
         return
     end
     handle_cursor_move()
-    local ok_parser, parser = pcall(ts.get_parser, 0)
-    if not ok_parser or not parser then
-        vim.notify("Pyrola: Tree-sitter parser not available for this buffer.", vim.log.levels.WARN)
-        return
-    end
-    local tree = parser:parse()[1]
+    local tree, parse_err = parse_tree_safely()
     if not tree then
-        print("No valid node found!")
+        local msg, end_row = current_line_message()
+        if not msg then
+            vim.notify(parse_err or "Pyrola: No valid node found!", vim.log.levels.WARN)
+            return
+        end
+        vim.notify(parse_err .. " Falling back to current line.", vim.log.levels.WARN)
+        send_message(msg)
+        move_cursor_to_next_line(end_row)
         return
     end
     local root = tree:root()

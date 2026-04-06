@@ -48,9 +48,9 @@ Since Pyrola is built on Jupyter kernels, **any language** with a Jupyter kernel
 
 - **Reliable interrupts**: Interrupt long-running cells and recover cleanly.
 
-- **One-command setup**: `:Pyrola setup` installs dependencies, ipykernel, and registers your kernel automatically.
+- **One-command setup**: `:Pyrola setup` installs dependencies and prepares a managed `pyrola_<language>` kernel automatically.
 
-- **Auto kernel registration**: When a kernel is missing, Pyrola offers to install and register it for Python filetypes.
+- **Auto kernel registration**: Pyrola auto-manages `pyrola_python`, `pyrola_r`, `pyrola_cpp`, and `pyrola_julia` unless you explicitly override the kernel name.
 
 ---
 
@@ -69,12 +69,14 @@ Add Pyrola to your plugin manager. Example using `lazy.nvim`:
 
     pyrola.setup({
       -- Optional: point to a specific Python (conda/venv).
-      -- If omitted, uses g:python3_host_prog or "python3".
+      -- If omitted, Pyrola uses the active python3 from PATH.
       -- python_path = "~/miniconda3/envs/ds/bin/python",
 
+      -- Optional overrides. When omitted, Pyrola auto-creates and uses
+      -- managed kernels named pyrola_<language>.
       kernel_map = {
-        python = "py3", -- Jupyter kernel name for Python files
-        r = "ir",       -- Jupyter kernel name for R files
+        -- python = "custom-python-kernel",
+        -- r = "custom-r-kernel",
       },
       split_horizontal = false,
       split_ratio = 0.65,
@@ -118,13 +120,13 @@ Pyrola needs a few Python packages. There are three ways to set them up:
 
 #### Option A: One-command setup (recommended)
 
-Open a file whose filetype is in your `kernel_map` and run:
+Open a file and run:
 
 ```vim
 :Pyrola setup
 ```
 
-This installs all dependencies via pip. For Python filetypes, it also installs `ipykernel` and registers the kernel matching your `kernel_map`. When finished, run `:Pyrola init` to start.
+This installs all dependencies via pip and prepares the managed kernel for the current filetype. By default the managed name is `pyrola_<language>`. When finished, run `:Pyrola init` to start.
 
 #### Option B: Manual install
 
@@ -134,7 +136,7 @@ pip install ipykernel
 python3 -m ipykernel install --user --name py3
 ```
 
-The kernel name (`py3` above) **must match** the name in your `kernel_map` config.
+If you manually set `kernel_map.python = "py3"`, the kernel name must match that explicit config.
 
 #### Option C: Auto-prompted install
 
@@ -142,26 +144,27 @@ When you run `:Pyrola init` with missing packages, Pyrola prompts you to install
 
 ### 3. Conda / venv users
 
-Set `python_path` in your config so Pyrola uses the correct interpreter:
+Usually you do not need extra config. Pyrola follows the active environment that launched Neovim and creates managed kernels named `pyrola_<language>`.
+
+Set `python_path` only if you want to override the active Python interpreter:
 
 ```lua
 pyrola.setup({
     python_path = "~/miniconda3/envs/ds/bin/python",
-    kernel_map = { python = "py3" },
 })
 ```
 
-This takes precedence over `g:python3_host_prog` and the system `python3`.
+This takes precedence over the active `python3` on PATH.
 
 ### 4. Non-Python kernels
 
-Install the appropriate Jupyter kernel and add it to `kernel_map`:
+Pyrola auto-creates `pyrola_r`, `pyrola_cpp`, and `pyrola_julia` by reusing the language kernel available in the current environment. If the underlying language kernel is missing, install it first:
 
-| Language | Kernel install | kernel_map name |
-|----------|---------------|-----------------|
-| **R** | `IRkernel::installspec()` (run from R) | `ir` |
-| **C++** | Install `xeus-cling` | `xcpp17` |
-| **Julia** | `using IJulia` (run from Julia) | `julia-1.x` |
+| Language | Underlying kernel requirement | Managed name |
+|----------|------------------------------|--------------|
+| **R** | `IRkernel` installed in the active R environment | `pyrola_r` |
+| **C++** | `xeus-cling` installed | `pyrola_cpp` |
+| **Julia** | `IJulia` installed | `pyrola_julia` |
 
 ### 5. Image preview (optional)
 
@@ -192,7 +195,7 @@ set -g allow-passthrough all
 
 | Command | Description |
 |---------|-------------|
-| `:Pyrola setup` | Install dependencies + register kernel (one-time) |
+| `:Pyrola setup` | Install dependencies + prepare the managed kernel for the current filetype |
 | `:Pyrola init` | Start kernel and open REPL terminal |
 
 Both commands support tab completion.
@@ -234,15 +237,15 @@ Both commands support tab completion.
 ```lua
 pyrola.setup({
     -- Python interpreter path. Supports ~ expansion.
-    -- Priority: python_path > g:python3_host_prog > "python3"
+    -- Priority: python_path > exepath("python3") > g:python3_host_prog > "python3"
     python_path = nil,
 
-    -- Map Neovim filetypes to Jupyter kernel names.
-    -- The kernel name must match what's registered with `jupyter kernelspec list`.
+    -- Optional explicit overrides. If a filetype is omitted, Pyrola uses
+    -- its managed kernel name: pyrola_<language>.
     kernel_map = {
-        python = "python3",
-        r = "ir",
-        cpp = "xcpp17",
+        -- python = "python3",
+        -- r = "ir",
+        -- cpp = "xcpp17",
     },
 
     -- REPL terminal split direction and size.
@@ -291,27 +294,35 @@ vim.api.nvim_set_hl(0, "PyrolaGlobalsNormal", { link = "NormalFloat" })
 
 ### `:Pyrola init` says "No such kernel"
 
-Your `kernel_map` name doesn't match any installed kernel. Check installed kernels:
+If you set an explicit `kernel_map` override, that name must exist:
 
 ```bash
 jupyter kernelspec list
 ```
 
-For Python, register a kernel:
+For Python, register a matching kernel:
 
 ```bash
 python3 -m ipykernel install --user --name py3
 ```
 
-Or just run `:Pyrola setup` in a Python buffer — it does this automatically.
+If you do not want to manage kernels manually, remove the explicit override and run `:Pyrola setup`.
 
 ### `:Pyrola init` says "python3 executable not found"
 
-Set `python_path` in your config or `g:python3_host_prog` to a valid Python 3 path:
+Set `python_path` in your config or ensure `python3` is on PATH:
 
 ```lua
 pyrola.setup({ python_path = "/usr/bin/python3" })
 ```
+
+### Non-Python managed kernel setup fails
+
+Pyrola can create `pyrola_r`, `pyrola_cpp`, and `pyrola_julia`, but the underlying language kernel must already be installed in the active environment:
+
+- R: install `IRkernel`
+- C++: install `xeus-cling`
+- Julia: install `IJulia`
 
 ### Images don't display
 
