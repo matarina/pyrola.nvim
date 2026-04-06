@@ -5,6 +5,8 @@ Bypasses the remote plugin system for Neovim 0.11+ compatibility.
 import sys
 import os
 import json
+import subprocess
+import threading
 import time
 
 # Add the plugin directory to path
@@ -18,10 +20,46 @@ from vari_inspector import get_python_inspector, get_r_inspector
 def init_kernel(kernel_name):
     """Initialize Jupyter kernel and return connection file path."""
     try:
+        result = {}
+        error = {}
         kernel_manager = KernelManager(kernel_name=kernel_name)
-        kernel_manager.start_kernel()
-        client = kernel_manager.client()
-        client.start_channels()
+
+        def worker():
+            try:
+                kernel_manager.start_kernel(
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                client = kernel_manager.client()
+                client.start_channels()
+                client.wait_for_ready(timeout=25)
+                result["client"] = client
+            except Exception as exc:
+                error["exc"] = exc
+                client = result.get("client")
+                if client is not None:
+                    try:
+                        client.stop_channels()
+                    except Exception:
+                        pass
+                try:
+                    kernel_manager.shutdown_kernel(now=True)
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        thread.join(30)
+        if thread.is_alive():
+            try:
+                kernel_manager.shutdown_kernel(now=True)
+            except Exception:
+                pass
+            return None
+        if "exc" in error:
+            return None
+
+        client = result["client"]
         return kernel_manager.connection_file
     except Exception as exc:
         return None

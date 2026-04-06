@@ -20,6 +20,8 @@ local RUNTIME_COMMANDS = {
     julia = "julia",
 }
 
+local INIT_KERNEL_TIMEOUT_MS = 30000
+
 local M = {
     config = {
         python_path = nil,
@@ -292,7 +294,7 @@ end
 local function init_kernel(kernelname)
     -- Try the new RPC server first
     if ensure_server_started() then
-        local result, err = rpc.request("init_kernel", { kernel_name = kernelname })
+        local result, err = rpc.request("init_kernel", { kernel_name = kernelname }, INIT_KERNEL_TIMEOUT_MS)
         if err then
             if string.find(err, "No such kernel") then
                 offer_kernel_install(nil, kernelname)

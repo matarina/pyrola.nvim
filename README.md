@@ -334,6 +334,17 @@ Pyrola can create `pyrola_r`, `pyrola_cpp`, and `pyrola_julia`, but the underlyi
 
 Use `pyrola.interrupt_kernel()` to send SIGINT. If the kernel is fully hung, restart with `:Pyrola init`.
 
+### `:Pyrola init` says "request timed out"
+
+Kernel startup can take longer on the first launch, especially in slower or remote environments. Pyrola now waits up to 30 seconds for `:Pyrola init`.
+
+If it still times out, verify the configured Python can import the required packages and start the target kernel:
+
+```bash
+python3 -c "import jupyter_client, prompt_toolkit, PIL, pygments"
+jupyter kernelspec list
+```
+
 ---
 
 ## TODO

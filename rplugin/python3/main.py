@@ -3,6 +3,8 @@ import sys
 sys.dont_write_bytecode = True
 
 import json
+import subprocess
+import threading
 import time
 
 import pynvim
@@ -49,10 +51,47 @@ class PyrolaPlugin:
 
         kernel_name = args[0]
         try:
-            self.kernel_manager = KernelManager(kernel_name=kernel_name)
-            self.kernel_manager.start_kernel()
-            self.client = self.kernel_manager.client()
-            self.client.start_channels()
+            result = {}
+            error = {}
+            kernel_manager = KernelManager(kernel_name=kernel_name)
+
+            def worker():
+                try:
+                    kernel_manager.start_kernel(
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    client = kernel_manager.client()
+                    client.start_channels()
+                    client.wait_for_ready(timeout=25)
+                    result["client"] = client
+                except Exception as exc:
+                    error["exc"] = exc
+                    client = result.get("client")
+                    if client is not None:
+                        try:
+                            client.stop_channels()
+                        except Exception:
+                            pass
+                    try:
+                        kernel_manager.shutdown_kernel(now=True)
+                    except Exception:
+                        pass
+
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            thread.join(30)
+            if thread.is_alive():
+                try:
+                    kernel_manager.shutdown_kernel(now=True)
+                except Exception:
+                    pass
+                raise RuntimeError(f"Kernel startup timed out for '{kernel_name}'")
+            if "exc" in error:
+                raise error["exc"]
+
+            self.kernel_manager = kernel_manager
+            self.client = result["client"]
             self._connection_file = self.kernel_manager.connection_file
             return self.kernel_manager.connection_file
         except Exception as exc:

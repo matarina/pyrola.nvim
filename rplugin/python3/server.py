@@ -18,6 +18,7 @@ sys.dont_write_bytecode = True
 import json
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -41,6 +42,56 @@ class PyrolaServer:
         self._connection_file = None
         self._inspector_initialized = set()
         self._kernel_spec_manager = KernelSpecManager()
+
+    def _start_kernel_client(self, kernel_name, startup_timeout=25):
+        result = {}
+        error = {}
+        kernel_manager = KernelManager(kernel_name=kernel_name)
+
+        def worker():
+            try:
+                kernel_manager.start_kernel(
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                client = kernel_manager.client()
+                client.start_channels()
+                client.wait_for_ready(timeout=startup_timeout)
+                result["client"] = client
+            except Exception as exc:
+                error["exc"] = exc
+                client = result.get("client")
+                if client is not None:
+                    try:
+                        client.stop_channels()
+                    except Exception:
+                        pass
+                try:
+                    kernel_manager.shutdown_kernel(now=True)
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        thread.join(startup_timeout + 5)
+
+        if thread.is_alive():
+            try:
+                kernel_manager.shutdown_kernel(now=True)
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Kernel startup timed out after {startup_timeout} seconds for '{kernel_name}'."
+            )
+
+        if "exc" in error:
+            raise RuntimeError(f"Kernel initialization failed: {error['exc']}")
+
+        client = result.get("client")
+        if client is None:
+            raise RuntimeError("Kernel initialization failed: no client created")
+
+        return kernel_manager, client
 
     def _managed_kernel_name(self, filetype):
         return f"pyrola_{filetype}"
@@ -342,10 +393,14 @@ class PyrolaServer:
         kernel_name = params.get("kernel_name")
         if not kernel_name:
             raise ValueError("missing kernel_name")
-        self.kernel_manager = KernelManager(kernel_name=kernel_name)
-        self.kernel_manager.start_kernel()
-        self.client = self.kernel_manager.client()
-        self.client.start_channels()
+        self._disconnect_client()
+        if self.kernel_manager:
+            try:
+                self.kernel_manager.shutdown_kernel(now=True)
+            except Exception:
+                pass
+            self.kernel_manager = None
+        self.kernel_manager, self.client = self._start_kernel_client(kernel_name)
         self._connection_file = self.kernel_manager.connection_file
         return {"connection_file": self.kernel_manager.connection_file}
 
