@@ -1,8 +1,10 @@
 local api, fn, ts = vim.api, vim.fn, vim.treesitter
 local rpc = require("pyrola.rpc")
+local plugin_path = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(debug.getinfo(1, "S").source:sub(2))))
 
 local DEPS = {
     { pip = "jupyter-client", import = "jupyter_client" },
+    { pip = "pynvim",         import = "pynvim" },
     { pip = "prompt-toolkit", import = "prompt_toolkit" },
     { pip = "pillow",         import = "PIL" },
     { pip = "pygments",       import = "pygments" },
@@ -148,13 +150,8 @@ local function get_plugin_path()
     if M.plugin_path then
         return M.plugin_path
     end
-    local runtime_paths = api.nvim_list_runtime_paths()
-    for _, path in ipairs(runtime_paths) do
-        if path:match("pyrola.nvim$") then
-            M.plugin_path = path
-            return path
-        end
-    end
+    M.plugin_path = plugin_path
+    return plugin_path
 end
 
 local function register_kernel_cleanup()
@@ -335,6 +332,7 @@ local function build_repl_env()
     local max_height_ratio = tonumber(image.max_height_ratio) or 0.5
 
     return {
+        PYROLA_IMAGE_INLINE = image.inline or "auto",
         PYROLA_IMAGE_CELL_WIDTH = tostring(cell_width),
         PYROLA_IMAGE_CELL_HEIGHT = tostring(cell_height),
         PYROLA_IMAGE_MAX_WIDTH_RATIO = tostring(max_width_ratio),
@@ -394,6 +392,9 @@ local function open_terminal(python_executable, kernelname)
 
     if M.connection_file_path then
         local nvim_socket = vim.v.servername
+        if nvim_socket == "" then
+            nvim_socket = fn.serverstart()
+        end
         local term_cmd = {
             python_executable,
             string.format("%s/rplugin/python3/console.py", console_path),
@@ -407,14 +408,26 @@ local function open_terminal(python_executable, kernelname)
 
         -- Open terminal with environment and options
         local chanid =
-            fn.termopen(
+            fn.jobstart(
             term_cmd,
             {
+                term = true,
                 env = build_repl_env(),
-                on_exit = function()
+                on_exit = function(job_id)
+                    if M.term.chanid == job_id then
+                        M.term.opened = 0
+                        M.term.chanid = 0
+                        M.repl_ready = false
+                        M.send_queue = {}
+                    end
                 end
             }
         )
+
+        if chanid <= 0 then
+            vim.notify("Pyrola: Failed to start REPL terminal.", vim.log.levels.ERROR)
+            return
+        end
 
         M.term = {
             opened = 1,
@@ -970,6 +983,12 @@ function M.setup(opts)
 end
 
 function M.init()
+    if M.term.opened == 1 and M.term.chanid ~= 0 then
+        if api.nvim_win_is_valid(M.term.winid) then
+            api.nvim_set_current_win(M.term.winid)
+        end
+        return
+    end
     local python_executable = validate_python_host()
     if not python_executable then
         return

@@ -56,6 +56,12 @@ Since Pyrola is built on Jupyter kernels, **any language** with a Jupyter kernel
 
 ## Installation
 
+Requires **Neovim 0.11 or newer** and Python 3.10 or newer. Verified locally
+against the latest stable Neovim **0.12.6**. Pyrola uses a standalone Python
+server; `:UpdateRemotePlugins` and a configured Neovim Python provider are
+not required. The console still requires the `pynvim` Python package, which
+is included in the requirements and checked by `:Pyrola init`.
+
 ### 1. Plugin setup
 
 Add Pyrola to your plugin manager. Example using `lazy.nvim`:
@@ -88,6 +94,7 @@ Add Pyrola to your plugin manager. Example using `lazy.nvim`:
         offset_row = 0,
         offset_col = 0,
         protocol = "auto", -- auto | kitty | iterm2 | none
+        inline = "auto", -- auto | kitty | blocks | none
       },
     })
 
@@ -102,7 +109,8 @@ Add Pyrola to your plugin manager. Example using `lazy.nvim`:
   end,
 },
 
--- Tree-sitter is required. Install parsers for languages in kernel_map.
+-- Install Tree-sitter parsers for semantic block selection.
+-- Without a parser, sending a statement falls back to the current line.
 {
   "nvim-treesitter/nvim-treesitter",
   build = ":TSUpdate",
@@ -166,11 +174,34 @@ Pyrola auto-creates `pyrola_r`, `pyrola_cpp`, and `pyrola_julia` by reusing the 
 | **C++** | `xeus-cling` installed | `pyrola_cpp` |
 | **Julia** | `IJulia` installed | `pyrola_julia` |
 
-### 5. Image preview (optional)
+### 5. Inline plots and image preview
+
+On Neovim 0.12+ in Kitty 0.28+, PNG plots use true bitmap images inline in
+the REPL terminal buffer. Colored Unicode placeholders keep each image attached
+to its output lines, so it scrolls with the code and stays in terminal scrollback.
+The original raster is retained; rendering is not limited to character blocks.
+Open the image history manager for a larger floating view.
+
+`image.inline = "auto"` enables this in Kitty and falls back to `timg` character
+blocks elsewhere. Use `"kitty"` to explicitly request the bitmap path, `"blocks"`
+for the old preview, or `"none"` to disable inline images. The bitmap cache retains
+the latest 50 plots; plots older than that may no longer render in scrollback.
+Inline output fits the terminal pane when emitted; narrowing the pane later
+can reflow older output, as it does other terminal text.
+
+### Floating image viewer
 
 Pyrola renders images in floating windows via **Kitty** or **iTerm2** terminal protocols (`image.protocol = "auto"` detects automatically).
 
-For **embedded pixel images** in the REPL console output, install [timg](https://github.com/hzeller/timg):
+Kitty floats use Unicode image placeholders so the plot stays centered and survives
+mouse clicks and editor redraws. Its size and position follow the current editor
+rows/columns and `max_width_ratio`/`max_height_ratio`; Kitty preserves aspect ratio
+inside that rectangle. Resizing the terminal or changing its font automatically
+updates the viewer, without assumed character pixel sizes. Close the image with `q` or `<Esc>` while its
+window is focused; moving the cursor no longer dismisses it. Verified interactively
+on Linux with Kitty and Neovim 0.12.6.
+
+For the **character-block fallback** in the REPL console output, install [timg](https://github.com/hzeller/timg):
 
 ```bash
 # Debian/Ubuntu
@@ -341,7 +372,7 @@ Kernel startup can take longer on the first launch, especially in slower or remo
 If it still times out, verify the configured Python can import the required packages and start the target kernel:
 
 ```bash
-python3 -c "import jupyter_client, prompt_toolkit, PIL, pygments"
+python3 -c "import jupyter_client, pynvim, prompt_toolkit, PIL, pygments"
 jupyter kernelspec list
 ```
 
@@ -355,6 +386,33 @@ jupyter kernelspec list
 
 * [Jupyter Team](https://github.com/jupyter/jupyter)
 * [nvim-python-repl](https://github.com/geg2102/nvim-python-repl) — Pyrola draws inspiration from this project.
+
+## Local demo
+
+With the Python dependencies installed in the system Python, run
+`./examples/run-demo.sh` to open the Linux metrics example in Kitty.
+The demo config installs the README mappings locally in Python/R/C++/Julia
+source buffers, including normal-mode **Enter** to send a semantic statement.
+The REPL keeps its own Enter behavior. Python block selection needs the
+Python Tree-sitter parser; install it with your parser manager.
+
+## Verification
+
+Run the integration suite in an isolated virtual environment:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r rplugin/python3/requirements.txt ipykernel
+./tests/run.sh
+```
+
+Set `PYROLA_TEST_PYTHON` to use another Python environment. The runner isolates
+Jupyter kernelspecs and Neovim's XDG directories in a temporary directory.
+It tests real kernel startup, terminal execution, Tree-sitter statement
+selection, variable inspection, globals, interrupts, repeated initialization,
+terminal shutdown, and RPC crash/restart/timeout handling. Pixel image output
+still needs a manual check in a Kitty- or iTerm2-compatible terminal; headless
+runs only verify safe image-module loading.
 
 ## Contributing
 

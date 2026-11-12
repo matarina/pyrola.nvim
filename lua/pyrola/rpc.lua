@@ -13,16 +13,24 @@ local _stdout_buf = "" -- partial line buffer
 local _stderr_buf = ""
 local _last_error = nil
 
+local function fail_pending(message)
+    for _, entry in pairs(_pending) do
+        entry.err = message
+        entry.done = true
+    end
+    _pending = {}
+end
+
 local function handle_stdout_line(line)
     if not line or line == "" then
         return
     end
     local ok, resp = pcall(vim.json.decode, line)
-    if ok and resp and resp.id ~= nil then
+    if ok and type(resp) == "table" and resp.id ~= nil then
         local cb = _pending[resp.id]
         if cb then
             cb.result = resp.result
-            cb.err = resp.error
+            cb.err = resp.error ~= vim.NIL and resp.error or nil
             cb.done = true
         end
     end
@@ -39,11 +47,12 @@ function M.start(python_executable, plugin_path)
 
     _last_error = nil
     _stderr_buf = ""
+    _stdout_buf = ""
     local server_script = plugin_path .. "/rplugin/python3/server.py"
     _job_id = fn.jobstart({ python_executable, server_script }, {
         cwd = plugin_path .. "/rplugin/python3",
-        on_stdout = function(_, data, _)
-            if not data then
+        on_stdout = function(job_id, data, _)
+            if job_id ~= _job_id or not data then
                 return
             end
             for i, chunk in ipairs(data) do
@@ -57,8 +66,8 @@ function M.start(python_executable, plugin_path)
                 end
             end
         end,
-        on_stderr = function(_, data, _)
-            if not data then
+        on_stderr = function(job_id, data, _)
+            if job_id ~= _job_id or not data then
                 return
             end
             for _, chunk in ipairs(data) do
@@ -67,7 +76,10 @@ function M.start(python_executable, plugin_path)
                 end
             end
         end,
-        on_exit = function(_, code, _)
+        on_exit = function(job_id, code, _)
+            if job_id ~= _job_id then
+                return
+            end
             if code ~= 0 then
                 local msg = _stderr_buf:gsub("%s+$", "")
                 if msg == "" then
@@ -77,7 +89,7 @@ function M.start(python_executable, plugin_path)
             end
             _job_id = nil
             _stdout_buf = ""
-            _pending = {}
+            fail_pending(_last_error or "server exited before replying")
         end,
     })
 
@@ -107,7 +119,11 @@ function M.request(method, params, timeout_ms)
     _pending[id] = entry
 
     local request = vim.json.encode({ id = id, method = method, params = params or {} })
-    fn.chansend(_job_id, request .. "\n")
+    local sent, send_err = pcall(fn.chansend, _job_id, request .. "\n")
+    if not sent then
+        _pending[id] = nil
+        return nil, tostring(send_err)
+    end
 
     -- Block until response arrives or timeout
     local ok = vim.wait(timeout_ms, function()
@@ -138,7 +154,7 @@ function M.stop()
     end
     _stdout_buf = ""
     _stderr_buf = ""
-    _pending = {}
+    fail_pending("server stopped")
 end
 
 --- Check if the server is running.

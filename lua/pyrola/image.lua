@@ -2,8 +2,10 @@ local M = {}
 
 local api = vim.api
 local fn = vim.fn
-local loop = vim.loop
+local loop = vim.uv
 local is_tmux = os.getenv("TMUX")
+local kitty = require("pyrola.kitty")
+local pixel_namespace = api.nvim_create_namespace("PyrolaImagePixels")
 
 -- Detect terminal image protocol
 local function detect_image_protocol()
@@ -43,7 +45,10 @@ end
 refresh_image_config()
 
 -- Create TTY output handle
-local stdout = loop.new_tty(1, false)
+local stdout
+if #api.nvim_list_uis() > 0 and loop.guess_handle(1) == "tty" then
+    stdout = loop.new_tty(1, false)
+end
 
 -- Track current image state for focus handling
 M.current_winid = nil
@@ -89,10 +94,15 @@ end
 
 -- Helper function to write to terminal
 local function write(data)
-    if not stdout or data == "" then
+    if data == "" then
         return
     end
-    stdout:write(data)
+    -- Keep graphics ordered with TUI redraws on Neovim 0.12+.
+    if api.nvim_ui_send then
+        api.nvim_ui_send(data)
+    elseif stdout then
+        stdout:write(data)
+    end
 end
 
 local function read_file(path)
@@ -204,36 +214,6 @@ local function get_window_screenpos(winid)
     return row, col
 end
 
-local function send_image_chunks(control_str, chunks, x, y, restore_row, restore_col)
-    if #chunks == 0 then
-        return
-    end
-    if is_tmux then
-        for i = 1, #chunks do
-            local chunk_control = control_str .. ",m=" .. (i < #chunks and "1" or "0")
-            local parts = {
-                string.format("\x1b[%d;%dH", y, x),
-                string.format("\x1b_G%s;%s\x1b\\", chunk_control, chunks[i])
-            }
-            if i == #chunks and restore_row and restore_col then
-                parts[#parts + 1] = string.format("\x1b[%d;%dH", restore_row, restore_col)
-            end
-            write(tmux_wrap(table.concat(parts)))
-        end
-        return
-    end
-
-    write(string.format("\x1b[%d;%dH", y, x))
-    for i = 1, #chunks do
-        local chunk_control = control_str .. ",m=" .. (i < #chunks and "1" or "0")
-        local cmd = string.format("\x1b_G%s;%s\x1b\\", chunk_control, chunks[i])
-        write(cmd)
-    end
-    if restore_row and restore_col then
-        write(string.format("\x1b[%d;%dH", restore_row, restore_col))
-    end
-end
-
 local function get_effective_protocol()
     local configured = image_config.protocol or "auto"
     if configured ~= "auto" then
@@ -264,41 +244,73 @@ local function pixels_to_cells(pixels, is_width)
     return math.ceil(pixels / cell_height)
 end
 
-local function create_image_float(image_width, image_height, focus)
+-- Kitty fits/letterboxes the source image in this cell rectangle. Neither
+-- layout nor centering depends on image pixels or assumed font metrics.
+local function float_layout(image_width, image_height)
     local win_width = vim.o.columns
-    local win_height = vim.o.lines
-
-    -- Convert image pixels to terminal cells
-    local width_cells = pixels_to_cells(image_width, true)
-    local height_cells = pixels_to_cells(image_height, false)
-
-    -- Add small padding inside the content area for centering
-    local float_width = width_cells + 2
-    local float_height = height_cells + 2
-
-    -- Calculate center position
-    local row = math.floor((win_height - float_height) / 2)
-    local col = math.floor((win_width - float_width) / 2)
-
-    local opts = {
-        relative = "editor",
-        width = float_width,
-        height = float_height,
-        row = row,
-        col = col,
-        style = "minimal",
-        border = "rounded",
-        title = " Image View ",
-        title_pos = "center"
+    local win_height = math.max(1, vim.o.lines - math.max(1, vim.o.cmdheight))
+    local function ratio(value)
+        return math.max(0.05, math.min(1, tonumber(value) or 0.5))
+    end
+    local width_cells, height_cells
+    if get_effective_protocol() == "kitty" then
+        width_cells = math.floor(win_width * ratio(image_config.max_width_ratio))
+        height_cells = math.floor(win_height * ratio(image_config.max_height_ratio))
+    else
+        width_cells = pixels_to_cells(image_width, true)
+        height_cells = pixels_to_cells(image_height, false)
+    end
+    width_cells = math.max(1, math.min(width_cells, win_width - 4, kitty.max_cells))
+    height_cells = math.max(1, math.min(height_cells, win_height - 4, kitty.max_cells))
+    local width, height = width_cells + 2, height_cells + 2
+    return {
+        relative = "editor", width = width, height = height,
+        row = math.max(0, math.floor((win_height - height - 2) / 2)),
+        col = math.max(0, math.floor((win_width - width - 2) / 2)),
+        style = "minimal", border = "rounded",
+        title = " Image View ", title_pos = "center",
     }
+end
 
+local function fill_placeholders(bufnr, width, height)
+    if get_effective_protocol() ~= "kitty" then
+        return
+    end
+    local lines = { "" }
+    for row = 1, height - 2 do
+        lines[#lines + 1] = " " .. kitty.line(row, width - 2) .. " "
+    end
+    lines[#lines + 1] = ""
+    vim.bo[bufnr].modifiable = true
+    api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+    api.nvim_buf_clear_namespace(bufnr, pixel_namespace, 0, -1)
+    api.nvim_set_hl(0, "PyrolaImagePixels", {fg = "#000001", nocombine = true})
+    for row = 1, height - 2 do
+        api.nvim_buf_set_extmark(bufnr, pixel_namespace, row, 1, {
+            end_row = row, end_col = #lines[row + 1] - 1,
+            hl_group = "PyrolaImagePixels",
+        })
+    end
+    vim.bo[bufnr].modifiable = false
+end
+
+local function create_image_float(image_width, image_height, focus)
+    local opts = float_layout(image_width, image_height)
+    local row, col = opts.row, opts.col
+    local float_width, float_height = opts.width, opts.height
     local bufnr = api.nvim_create_buf(false, true)
+    fill_placeholders(bufnr, float_width, float_height)
     vim.bo[bufnr].modifiable = false
     vim.bo[bufnr].buftype = "nofile"
+    vim.bo[bufnr].bufhidden = "wipe"
 
     local winid = api.nvim_open_win(bufnr, focus or false, opts)
 
     vim.wo[winid].cursorline = false
+    vim.wo[winid].wrap = false
+    vim.wo[winid].scrolloff = 0
+    vim.wo[winid].sidescrolloff = 0
+    vim.wo[winid].list = false
 
     -- Set window highlights
     local border_hl = "PyrolaImageBorder"
@@ -413,21 +425,6 @@ local function push_history(entry)
     M.history_index = #M.history
 end
 
-local function setup_cursor_autocmd()
-    local group = api.nvim_create_augroup("ImageClear", {clear = true})
-    api.nvim_create_autocmd(
-        {"CursorMoved", "CursorMovedI"},
-        {
-            group = group,
-            callback = function()
-                cleanup_image()
-                api.nvim_del_augroup_by_name("ImageClear")
-            end,
-            once = true
-        }
-    )
-end
-
 local function set_manager_keymaps(bufnr)
     local opts = {noremap = true, silent = true, nowait = true, buffer = bufnr}
     vim.keymap.set("n", "h", function()
@@ -436,36 +433,36 @@ local function set_manager_keymaps(bufnr)
     vim.keymap.set("n", "l", function()
         M.show_next_image(true)
     end, opts)
-    vim.keymap.set("n", "q", function()
-        cleanup_image()
-    end, opts)
+    for _, key in ipairs({"q", "<Esc>"}) do
+        vim.keymap.set("n", key, cleanup_image, opts)
+    end
 end
 
 local function draw_image(base64_data, width, height, winid, float_row, float_col, float_width, float_height)
     if not api.nvim_win_is_valid(winid) then
         return
     end
-    local cursor_row, cursor_col = get_cursor_screenpos_raw()
-    local row_offset, col_offset = get_tmux_offset(cursor_row, cursor_col)
-    local row_adjust = tonumber(image_config.offset_row) or 0
-    local col_adjust = tonumber(image_config.offset_col) or 0
-    local base_row, base_col = get_window_screenpos(winid)
-    if not base_row then
-        base_row = float_row + 1
-        base_col = float_col + 1
-    end
-    base_row = base_row + row_offset + row_adjust
-    base_col = base_col + col_offset + col_adjust
-    local x, y = get_image_position(base_row, base_col, float_width, float_height, width, height)
-
-    local restore_row, restore_col = nil, nil
-    if cursor_row and cursor_col then
-        restore_row = cursor_row + row_offset
-        restore_col = cursor_col + col_offset
-    end
-
     local proto = get_effective_protocol()
     if proto == "iterm2" then
+        local cursor_row, cursor_col = get_cursor_screenpos_raw()
+        local row_offset, col_offset = get_tmux_offset(cursor_row, cursor_col)
+        local row_adjust = tonumber(image_config.offset_row) or 0
+        local col_adjust = tonumber(image_config.offset_col) or 0
+        local base_row, base_col = get_window_screenpos(winid)
+        if not base_row then
+            base_row = float_row + 1
+            base_col = float_col + 1
+        end
+        base_row = base_row + row_offset + row_adjust
+        base_col = base_col + col_offset + col_adjust
+        local x, y = get_image_position(base_row, base_col, float_width, float_height, width, height)
+
+        local restore_row, restore_col = nil, nil
+        if cursor_row and cursor_col then
+            restore_row = cursor_row + row_offset
+            restore_col = cursor_col + col_offset
+        end
+
         local width_cells = pixels_to_cells(width, true)
         local height_cells = pixels_to_cells(height, false)
         send_iterm2_image(base64_data, width_cells, height_cells, x, y, restore_row, restore_col)
@@ -477,19 +474,31 @@ local function draw_image(base64_data, width, height, winid, float_row, float_co
             q = 2, -- Quiet mode
             i = 1, -- Image ID
             C = 1, -- Don't move cursor
-            w = width, -- Image width
-            h = height -- Image height
+            U = 1, -- Virtual placement displayed by buffer placeholders
+            c = float_width - 2,
+            r = float_height - 2
         }
 
         local control_str = build_control_string(control)
         local chunks = get_chunked(base64_data)
-        send_image_chunks(control_str, chunks, x, y, restore_row, restore_col)
+        -- Virtual placements have no cursor location. The buffer supplies it.
+        local parts = {}
+        for i, chunk in ipairs(chunks) do
+            local control = (i == 1 and control_str .. "," or "q=2,")
+                .. "m=" .. (i < #chunks and "1" or "0")
+            parts[#parts + 1] = tmux_wrap(string.format("\x1b_G%s;%s\x1b\\", control, chunk))
+        end
+        write(table.concat(parts))
     end
 end
 
-local function display_image(base64_data, width, height, record_history, focus, auto_clear)
+local function display_image(base64_data, width, height, record_history, focus)
     refresh_image_config()
-    if not stdout then
+    local terminal_ui = stdout ~= nil
+    for _, ui in ipairs(api.nvim_list_uis()) do
+        terminal_ui = terminal_ui or ui.stdout_tty == true
+    end
+    if not terminal_ui then
         vim.notify("Pyrola: Image display disabled (no TTY available).", vim.log.levels.WARN)
         return
     end
@@ -529,11 +538,11 @@ local function display_image(base64_data, width, height, record_history, focus, 
         end
         draw_image(base64_data, width, height, winid, float_row, float_col, float_width, float_height)
     end, 20)
+    set_manager_keymaps(bufnr)
     if focus then
         M.manager_winid = winid
         M.manager_bufid = bufnr
         M.manager_active = true
-        set_manager_keymaps(bufnr)
         if not M.manager_guicursor then
             M.manager_guicursor = vim.o.guicursor
             vim.o.guicursor = "a:ver1-Cursor"
@@ -542,9 +551,6 @@ local function display_image(base64_data, width, height, record_history, focus, 
         M.manager_winid = nil
         M.manager_bufid = nil
         M.manager_active = false
-    end
-    if auto_clear then
-        setup_cursor_autocmd()
     end
 end
 
@@ -576,10 +582,46 @@ local function redraw_image()
     end, 20)
 end
 
+local resize_pending = false
+local function resize_image()
+    if resize_pending or not M.current_winid then
+        return
+    end
+    resize_pending = true
+    vim.schedule(function()
+        resize_pending = false
+        local win = M.current_winid
+        if not win or not api.nvim_win_is_valid(win) or not M.current_image_data then
+            return
+        end
+        refresh_image_config()
+        local layout = float_layout(M.current_image_width, M.current_image_height)
+        local old = M.current_float_pos
+        if old and old.width == layout.width and old.height == layout.height
+            and old.row == layout.row and old.col == layout.col then
+            return
+        end
+        api.nvim_win_set_config(win, layout)
+        fill_placeholders(api.nvim_win_get_buf(win), layout.width, layout.height)
+        M.current_float_pos = {
+            winid = win, row = layout.row, col = layout.col,
+            width = layout.width, height = layout.height,
+        }
+        api.nvim_win_call(win, function()
+            fn.winrestview({topline = 1, leftcol = 0})
+        end)
+        redraw_image()
+    end)
+end
+
 -- Setup global autocmds for VimLeave (run once at module load)
 local function setup_global_autocmds()
     refresh_image_config()
     local group = api.nvim_create_augroup("ImageGlobal", {clear = true})
+
+    api.nvim_create_autocmd({"VimResized", "WinResized"}, {
+        group = group, callback = resize_image,
+    })
 
     -- Clear image when quitting Neovim
     api.nvim_create_autocmd("VimLeavePre", {
@@ -589,12 +631,24 @@ local function setup_global_autocmds()
         end
     })
 
+    api.nvim_create_autocmd("WinClosed", {
+        group = group,
+        callback = function(ev)
+            if tonumber(ev.match) == M.current_winid then
+                M.current_winid = nil
+                cleanup_image()
+            end
+        end,
+    })
+
     -- Handle window switching - clear on focus lost
     api.nvim_create_autocmd("FocusLost", {
         group = group,
         callback = function()
             M.image_needs_redraw = true
-            clear_image(1)
+            if get_effective_protocol() ~= "kitty" then
+                clear_image(1)
+            end
         end
     })
 
@@ -631,9 +685,14 @@ local function setup_global_autocmds()
 end
 setup_global_autocmds()
 
+-- Record an inline image without opening a float over the terminal output.
+function M.record_image(data, width, height)
+    push_history({data = data, width = width, height = height})
+end
+
 -- Main function to display image
 function M.show_image(base64_data, width, height)
-    display_image(base64_data, width, height, true, false, true)
+    display_image(base64_data, width, height, true, false)
 end
 
 function M.show_image_file(path, width, height)
@@ -646,7 +705,7 @@ function M.show_image_file(path, width, height)
         vim.notify("Pyrola: Image file empty or unreadable.", vim.log.levels.WARN)
         return
     end
-    display_image(content, width, height, true, false, true)
+    display_image(content, width, height, true, false)
 end
 
 local function show_history_at(index, focus)
@@ -659,7 +718,7 @@ local function show_history_at(index, focus)
     end
     local entry = M.history[index]
     M.history_index = index
-    display_image(entry.data, entry.width, entry.height, false, focus, not focus)
+    display_image(entry.data, entry.width, entry.height, false, focus)
 end
 
 function M.open_history_manager()

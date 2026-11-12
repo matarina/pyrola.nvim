@@ -2,3 +2,4 @@ jupyter-client
 prompt-toolkit
 pillow
 pygments
+pynvim

@@ -14,6 +14,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from concurrent.futures import Future
 from queue import Empty, Queue
 from threading import Lock, Thread
 from typing import List, Optional
@@ -549,74 +550,48 @@ class ReplInterpreter:
                             print(f"Error in Neovim thread: {e}", file=sys.stderr)
                         continue
 
+                    if kind == "inline_image":
+                        image_data, columns, rows, future = payload
+                        path = None
+                        try:
+                            if not self._ensure_nvim():
+                                raise RuntimeError("Neovim connection unavailable")
+                            with Image.open(io.BytesIO(base64.b64decode(image_data))) as img:
+                                width, height = img.size
+                            with tempfile.NamedTemporaryFile(suffix=".b64", delete=False) as file:
+                                file.write(image_data.encode("ascii"))
+                                path = file.name
+                            with self.nvim_lock:
+                                text = self.nvim.exec_lua(
+                                    "return require('pyrola.inline').render_file(...)",
+                                    path, columns, rows, width, height,
+                                )
+                            if not future.done():
+                                future.set_result(text)
+                        except Exception as exc:
+                            if not future.done():
+                                future.set_exception(exc)
+                        finally:
+                            if path:
+                                self._cleanup_temp_path(path)
+                        continue
+
                     if kind != "image":
                         continue
 
                     if not self._ensure_nvim():
                         continue
+                    # Keep the original raster. The terminal fits it to the
+                    # current cell rectangle, including after a later resize.
+                    # Guessing cell pixel sizes here both blurred plots and
+                    # coupled the payload to the editor's initial dimensions.
                     try:
-                        with self.nvim_lock:
-                            dimensions = {
-                                "width": self.nvim.lua.vim.api.nvim_get_option(
-                                    "columns"
-                                ),
-                                "height": self.nvim.lua.vim.api.nvim_get_option(
-                                    "lines"
-                                ),
-                            }
-                    except Exception as e:
-                        if self._handle_nvim_disconnect(e, "image sync"):
-                            continue
-                        print(f"Error in Neovim thread: {e}", file=sys.stderr)
-                        continue
-
-                    target_width = max(
-                        1,
-                        int(dimensions["width"] * self._cell_width * self._image_max_width_ratio),
-                    )
-                    target_height = max(
-                        1,
-                        int(dimensions["height"] * self._cell_height * self._image_max_height_ratio),
-                    )
-
-                    try:
-                        img_bytes = base64.b64decode(payload)
-                        img = Image.open(io.BytesIO(img_bytes))
+                        with Image.open(io.BytesIO(base64.b64decode(payload))) as img:
+                            new_width, new_height = img.size
                     except Exception as e:
                         print(f"Error handling image: {e}", file=sys.stderr)
                         continue
-
-                    orig_width, orig_height = img.size
-
-                    if (
-                        orig_width > target_width
-                        or orig_height > target_height
-                        or orig_width < target_width / 2
-                        or orig_height < target_height / 2
-                    ):
-
-                        # Calculate scaling ratio while maintaining aspect ratio
-                        width_ratio = target_width / orig_width
-                        height_ratio = target_height / orig_height
-                        ratio = min(width_ratio, height_ratio)
-
-                        # Calculate new dimensions
-                        new_width = int(orig_width * ratio)
-                        new_height = int(orig_height * ratio)
-
-                        # Resize image
-                        img = img.resize(
-                            (new_width, new_height), Image.Resampling.LANCZOS
-                        )
-
-                        # Convert back to base64
-                        buffer = io.BytesIO()
-                        img.save(buffer, format="PNG")
-                        img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-                    else:
-                        new_width = orig_width
-                        new_height = orig_height
-                        img_base64 = payload
+                    img_base64 = payload
                     tmp_path = None
                     try:
                         with tempfile.NamedTemporaryFile(
@@ -774,13 +749,45 @@ class ReplInterpreter:
                             tmp_path = tmp.name
                         self._register_temp_path(tmp_path)
 
+                        inline_mode = os.environ.get("PYROLA_IMAGE_INLINE", "auto")
+                        inline_kitty = inline_mode == "kitty" or (
+                            inline_mode == "auto" and bool(os.environ.get("KITTY_WINDOW_ID"))
+                        )
+                        if image_mime == "image/png" and self._nvim_address and inline_kitty:
+                            size = shutil.get_terminal_size()
+                            future = Future()
+                            self._start_nvim_thread()
+                            self.nvim_queue.put(("inline_image", (
+                                image_data, max(1, size.columns - 1),
+                                max(1, int(size.lines * self._image_max_height_ratio)), future,
+                            )))
+                            try:
+                                text = await asyncio.wait_for(asyncio.wrap_future(future), timeout=5)
+                                if text:
+                                    sys.stdout.write(text)
+                                    sys.stdout.flush()
+                                    continue
+                            except Exception as exc:
+                                if self._image_debug:
+                                    print(f"Inline image fallback: {exc}", file=sys.stderr)
+                        if inline_mode == "none":
+                            continue
+
+                        # Floating images do not depend on the optional inline
+                        # renderer. Queue them even when timg is absent or fails.
+                        if image_mime == "image/png" and self._nvim_address:
+                            self._start_nvim_thread()
+                            self.nvim_queue.put(("image", image_data))
+                        renderer = shutil.which("timg")
+                        if not renderer:
+                            continue
                         try:
                             # Get terminal size explicitly since prompt_toolkit
                             # may prevent timg from detecting it
                             term_size = shutil.get_terminal_size()
                             size_arg = f"-g{term_size.columns}x{term_size.lines}"
                             proc = await asyncio.create_subprocess_exec(
-                                "timg", "-p", "q", size_arg, tmp_path,
+                                renderer, "-p", "q", size_arg, tmp_path,
                                 stdout=asyncio.subprocess.PIPE,
                                 stderr=asyncio.subprocess.PIPE,
                             )
@@ -798,12 +805,9 @@ class ReplInterpreter:
                                 sys.stdout.flush()
                             if proc.returncode != 0:
                                 raise subprocess.CalledProcessError(proc.returncode, "timg")
-                            if image_mime == "image/png" and self._nvim_address:
-                                self._start_nvim_thread()
-                                self.nvim_queue.put(("image", image_data))
                         except (
                             subprocess.CalledProcessError,
-                            FileNotFoundError,
+                            OSError,
                         ) as e:
                             print(f"Failed to display image: {e}")
                     except Exception as e:
