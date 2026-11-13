@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'rplugin/python3'))
-from console import ReplInterpreter
+from console import ReplInterpreter, _terminal_png
 
 class ImageDeliveryTest(unittest.TestCase):
     def test_floating_image_without_timg(self):
@@ -86,9 +86,24 @@ class ImageResolutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             repl._temp_dir = SimpleNamespace(name=temp)
             repl._nvim_worker()
-        self.assertEqual(captured['payload'], payload)
+        actual = Image.open(io.BytesIO(base64.b64decode(captured['payload'])))
+        self.assertEqual(actual.mode, 'RGBA')
+        self.assertEqual(actual.size, (1800, 1170))
+        self.assertEqual(actual.tobytes(), Image.open(stream).convert('RGBA').tobytes())
         self.assertEqual(captured['width'], '1800')
         self.assertEqual(captured['height'], '1170')
+
+    def test_normalization_preserves_transparent_pixels_and_resolution(self):
+        original = Image.new('RGBA', (3, 2))
+        original.putdata([(0,160,255,255),(255,0,160,128),(0,0,0,0)]*2)
+        stream = io.BytesIO()
+        original.save(stream, format='PNG', dpi=(120,120))
+        encoded=base64.b64encode(stream.getvalue()).decode()
+        payload, width, height = _terminal_png(encoded)
+        self.assertNotEqual(payload, encoded, 'RGBA inputs must also be re-encoded')
+        actual = Image.open(io.BytesIO(base64.b64decode(payload)))
+        self.assertEqual((width,height), original.size)
+        self.assertEqual(actual.tobytes(), original.tobytes())
 
 if __name__ == '__main__':
     unittest.main()

@@ -582,6 +582,10 @@ local function send_message(message)
     flush_send_queue()
 end
 
+function M._on_repl_busy()
+    M.repl_ready = false
+end
+
 function M._on_repl_ready()
     if _queue_timeout_timer then
         _queue_timeout_timer:stop()

@@ -444,9 +444,13 @@ Set `PYROLA_TEST_PYTHON` to use another Python environment. The runner isolates
 Jupyter kernelspecs and Neovim's XDG directories in a temporary directory.
 It tests real kernel startup, terminal execution, Tree-sitter statement
 selection, variable inspection, globals, interrupts, repeated initialization,
-terminal shutdown, and RPC crash/restart/timeout handling. Pixel image output
-still needs a manual check in a Kitty- or iTerm2-compatible terminal; headless
-runs only verify safe image-module loading.
+terminal shutdown, and RPC crash/restart/timeout handling.
+
+The optional [live rendering suite](tests/README.md) runs Python and R code in
+real Kitty/Neovim sessions and checks captured pixels for inline plots and
+repeated image-history navigation. It also covers REPL input, error recovery,
+interrupts, and reconnection. Headless checks alone cannot verify visible
+image output. iTerm2 rendering still requires a manual check.
 
 ## Contributing
 

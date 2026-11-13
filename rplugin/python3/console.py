@@ -101,6 +101,17 @@ def _read_env_float(name, default):
     return min(value, 1.0)
 
 
+def _terminal_png(payload):
+    """Normalize PNG encoding, preserving resolution and alpha."""
+    with Image.open(io.BytesIO(base64.b64decode(payload))) as image:
+        width, height = image.size
+        stream = io.BytesIO()
+        # Re-encode RGBA inputs too: changing only RGB inputs did not fix
+        # blank IRkernel plots in real Kitty/Neovim sessions.
+        image.convert("RGBA").save(stream, format="PNG")
+    return base64.b64encode(stream.getvalue()).decode("ascii"), width, height
+
+
 class ReplInterpreter:
     def __init__(self, connection_file: Optional[str] = None, lan: str = None):
         self.buffer: List[str] = []
@@ -459,6 +470,9 @@ class ReplInterpreter:
     async def handle_execute(self, code):
 
         self._interrupt_requested = False
+        if self._nvim_address:
+            self._start_nvim_thread()
+            self.nvim_queue.put(("repl_busy", None))
 
         while self.client.shell_channel.msg_ready():
             self.client.get_shell_msg()
@@ -509,6 +523,7 @@ class ReplInterpreter:
         msg = self.client.get_stdin_msg(timeout=timeout)
         if msg_id == msg["parent_header"].get("msg_id"):
             content = msg["content"]
+            previous_prompt = self.session.message
             try:
                 raw_data = await self.session.prompt_async(content["prompt"])
                 if not (
@@ -519,6 +534,10 @@ class ReplInterpreter:
             except (EOFError, KeyboardInterrupt):
                 print("\n")
                 return
+            finally:
+                # PromptSession retains a supplied message for future prompts.
+                # Kernel stdin prompts must not replace the normal REPL prompt.
+                self.session.message = previous_prompt
 
     def interact(self, banner: Optional[str] = None):
         asyncio.run(self.interact_async(banner))
@@ -536,16 +555,16 @@ class ReplInterpreter:
                     else:
                         kind, payload = "image", data
 
-                    if kind == "repl_ready":
+                    if kind in ("repl_ready", "repl_busy"):
                         if not self._ensure_nvim():
                             continue
                         try:
                             with self.nvim_lock:
                                 self.nvim.command(
-                                    'lua require("pyrola")._on_repl_ready()'
+                                    f'lua require("pyrola")._on_{kind}()'
                                 )
                         except Exception as e:
-                            if self._handle_nvim_disconnect(e, "repl_ready"):
+                            if self._handle_nvim_disconnect(e, kind):
                                 continue
                             print(f"Error in Neovim thread: {e}", file=sys.stderr)
                         continue
@@ -556,8 +575,7 @@ class ReplInterpreter:
                         try:
                             if not self._ensure_nvim():
                                 raise RuntimeError("Neovim connection unavailable")
-                            with Image.open(io.BytesIO(base64.b64decode(image_data))) as img:
-                                width, height = img.size
+                            image_data, width, height = _terminal_png(image_data)
                             with tempfile.NamedTemporaryFile(suffix=".b64", delete=False) as file:
                                 file.write(image_data.encode("ascii"))
                                 path = file.name
@@ -586,12 +604,10 @@ class ReplInterpreter:
                     # Guessing cell pixel sizes here both blurred plots and
                     # coupled the payload to the editor's initial dimensions.
                     try:
-                        with Image.open(io.BytesIO(base64.b64decode(payload))) as img:
-                            new_width, new_height = img.size
+                        img_base64, new_width, new_height = _terminal_png(payload)
                     except Exception as e:
                         print(f"Error handling image: {e}", file=sys.stderr)
                         continue
-                    img_base64 = payload
                     tmp_path = None
                     try:
                         with tempfile.NamedTemporaryFile(
