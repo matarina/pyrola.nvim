@@ -55,33 +55,19 @@ available, with its existing variables, for the next calculation.
 Recorded from real Neovim, Kitty, and Python/Jupyter sessions.
 [Recording instructions](docs/gifs/README.md).
 
-<details>
-<summary>Original video walkthrough</summary>
-
-<div align="center">
-  <a href="https://www.youtube.com/watch?v=S3arFOPnD40">
-    <img src="https://img.youtube.com/vi/S3arFOPnD40/0.jpg" alt="Watch the video" style="width:100%;">
-  </a>
-</div>
-
-</details>
-
 ## Features
 
 - **Multi-language support**: Any language with a Jupyter kernel works in Pyrola (Python, R, C++, Julia, etc.).
-  ![recording_2026-01-04_07-36-08 - frame at 0m57s](https://github.com/user-attachments/assets/71d3ca3c-4f16-4567-b81c-c9d7e77383bc)
 
 - **Real-time REPL**: Execute code dynamically within Neovim with immediate feedback.
 
 - **Multiple code-sending methods**: Send code via Tree-sitter semantic blocks, visual selection, or entire buffer.
 
 - **Variable inspector**: Inspect variables (class, type, shape, content) directly from the REPL (Python and R).
- ![recording_2026-01-04_07-36-08 - frame at 0m52s](https://github.com/user-attachments/assets/c6668a17-da69-4ae5-ba88-841ec9f3f059)
 
 - **Global variable browser**: View all user globals in a floating window. Press `<CR>` on any variable to inspect it.
 
 - **Image viewer**: Preview image outputs in a floating window via Kitty or iTerm2 terminal protocols.
-  ![recording_2026-01-04_07-36-08 - frame at 0m40s](https://github.com/user-attachments/assets/7ad7400c-f251-452b-879f-e9bd39d4f791)
 
 - **Image history**: Browse previously plotted images in a floating window.
 
