@@ -21,11 +21,50 @@ Since Pyrola is built on Jupyter kernels, **any language** with a Jupyter kernel
 
 ## Demo
 
+### Send statements, functions, and selections
+
+Press `<CR>` to send the Python statement or complete function under the cursor.
+Select lines with `V`, then press `<leader>vs` to send just that selection.
+These recordings use **Space** as `<leader>`.
+
+![Sending a statement, a complete function, and a visual selection to the live Python REPL](docs/gifs/send-code.gif)
+
+### Explore live variables
+
+Run a buffer with `<leader>vb`, open globals with `<leader>ig`, and press `<CR>`
+on an entry to inspect its type, shape, and values. Use `<leader>is` to inspect
+the symbol under the editor cursor.
+
+![Browsing global variables and inspecting a NumPy array and a Python dictionary](docs/gifs/inspect-variables.gif)
+
+### Plot inline and browse image history
+
+Matplotlib plots render inside Kitty's REPL pane and scroll with their output.
+Press `<leader>im` for a larger preview, use `h` / `l` to browse previous plots,
+and press `q` to return to the editor.
+
+![Scrolling inline Matplotlib plots and browsing sine and cosine plots in the floating image viewer](docs/gifs/plots-and-history.gif)
+
+### Interrupt and keep working
+
+Press `<leader>ik` to interrupt a long-running cell. The same kernel stays
+available, with its existing variables, for the next calculation.
+
+![Interrupting a sleeping Python cell and continuing calculations with the existing answer variable](docs/gifs/interrupt-recover.gif)
+
+Recorded from real Neovim, Kitty, and Python/Jupyter sessions.
+[Recording instructions](docs/gifs/README.md).
+
+<details>
+<summary>Original video walkthrough</summary>
+
 <div align="center">
   <a href="https://www.youtube.com/watch?v=S3arFOPnD40">
     <img src="https://img.youtube.com/vi/S3arFOPnD40/0.jpg" alt="Watch the video" style="width:100%;">
   </a>
 </div>
+
+</details>
 
 ## Features
 
