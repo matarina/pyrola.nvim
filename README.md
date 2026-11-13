@@ -72,6 +72,10 @@ Recorded from real Neovim, Kitty, and Python/Jupyter sessions.
 
 - **Multiple code-sending methods**: Send code via Tree-sitter semantic blocks, visual selection, or entire buffer.
 
+- **Notebook-style cells**: Execute, navigate, insert, delete and move cells using `# %%` markers (`// %%` in C++).
+
+- **Persistent REPL toggle**: Hide or reopen the split while keeping the running console, scrollback and kernel state.
+
 - **Variable inspector**: Inspect variables (class, type, shape, content) directly from the REPL (Python and R).
 
 - **Global variable browser**: View all user globals in a floating window. Press `<CR>` on any variable to inspect it.
@@ -89,6 +93,10 @@ Recorded from real Neovim, Kitty, and Python/Jupyter sessions.
 ---
 
 ## Installation
+
+For a short, complete setup using `python3 -m venv` and a minimal Neovim
+configuration, start with the [quickstart](docs/quickstart.md). It also includes
+current and older Kickstart integration and separate project-kernel examples.
 
 Requires **Neovim 0.11 or newer** and Python 3.10 or newer. Verified locally
 against the latest stable Neovim **0.12.6**. Pyrola uses a standalone Python
@@ -262,8 +270,14 @@ set -g allow-passthrough all
 |---------|-------------|
 | `:Pyrola setup` | Install dependencies + prepare the managed kernel for the current filetype |
 | `:Pyrola init` | Start kernel and open REPL terminal |
+| `:Pyrola toggle` | Hide/show the split while retaining the console, scrollback and kernel |
+| `:Pyrola cell` | Execute the current cell between `# %%` markers (`// %%` for C++) |
+| `:Pyrola next` / `:Pyrola previous` | Navigate cells without wrapping |
+| `:Pyrola cell-above` / `:Pyrola cell-below` | Insert an empty cell |
+| `:Pyrola cell-delete` | Delete the current cell, including its marker |
+| `:Pyrola cell-up` / `:Pyrola cell-down` | Move the current cell and its marker |
 
-Both commands support tab completion.
+All commands support tab completion. Cell edits use Neovim's normal undo history.
 
 ### Sending code
 
@@ -272,6 +286,28 @@ Both commands support tab completion.
 | `pyrola.send_statement_definition()` | Send the Tree-sitter semantic block under cursor. When REPL is not running, falls back to normal `<CR>`. |
 | `pyrola.send_visual_to_repl()` | Send visual selection to REPL. Exits visual mode and moves cursor to next code line. |
 | `pyrola.send_buffer_to_repl()` | Send the entire buffer to REPL. |
+| `pyrola.send_cell_to_repl()` | Send the current cell, excluding its marker. Empty cells are ignored. |
+
+Cells use comment lines beginning with `# %%` (Python/R/Julia) or `// %%`
+(C++), optionally followed by a title. Text before the first marker is an
+implicit first cell; an unmarked buffer is one cell. A cursor on a marker
+belongs to the following cell. Markers are recognized by their line text;
+avoid marker-shaped lines inside multiline string literals.
+
+Cell APIs: `next_cell()`, `previous_cell()`, `select_cell()`,
+`insert_cell_above()`, `insert_cell_below()`, `delete_cell()`, `move_cell_up()`,
+and `move_cell_down()`. Structural edits add a marker to an implicit first
+cell when needed to preserve its boundary. Inserting a cell keeps Normal mode
+and places the cursor on its blank content line. Boundary moves are no-ops.
+
+Example mappings (also provided by the [minimal config](examples/minimal-init.lua)):
+
+```lua
+vim.keymap.set('n', '<leader>vc', pyrola.send_cell_to_repl)
+vim.keymap.set('n', ']c', pyrola.next_cell)
+vim.keymap.set('n', '[c', pyrola.previous_cell)
+vim.keymap.set('n', '<leader>pt', pyrola.toggle_split)
+```
 
 ### Inspecting variables
 
@@ -285,6 +321,7 @@ Both commands support tab completion.
 | Function | Description |
 |----------|-------------|
 | `pyrola.interrupt_kernel()` | Send SIGINT to interrupt the running kernel execution. |
+| `pyrola.toggle_split()` | Toggle the REPL window without stopping its job or kernel. `init()` also reopens a hidden window. |
 
 ### Image history
 

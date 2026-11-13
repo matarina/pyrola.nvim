@@ -14,7 +14,10 @@ local function test()
     local p = require("pyrola").setup({python_path = python, kernel_map = {python = "python3"}, image = {protocol = "none"}})
     p.setup({}) -- repeated setup must not duplicate commands/autocmds
     assert(vim.fn.exists(":Pyrola") == 2)
-    assert(vim.deep_equal(vim.fn.getcompletion("Pyrola ", "cmdline"), {"init", "setup"}))
+    local commands = vim.fn.getcompletion("Pyrola ", "cmdline")
+    for _, command in ipairs({'init','setup','toggle','cell','cell-up','cell-down'}) do
+        assert(vim.tbl_contains(commands,command), 'Missing command: '..command)
+    end
     -- No terminal escapes or libuv TTY handles when headless.
     assert(require("pyrola.image"))
     vim.cmd.colorscheme("default")

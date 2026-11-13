@@ -340,28 +340,15 @@ local function build_repl_env()
     }
 end
 
-local function open_terminal(python_executable, kernelname)
-    M.filetype = vim.bo.filetype
-    local origin_win = api.nvim_get_current_win()
-    if not kernelname then
-        vim.notify(
-            string.format("Pyrola: No kernel mapped for filetype '%s'.", M.filetype),
-            vim.log.levels.ERROR
-        )
-        return
-    end
-
-    if not M.connection_file_path then
-        local connection_file = init_kernel(kernelname)
-        if not connection_file then
-            return
+local function show_terminal_buffer(bufid, kernelname)
+    if api.nvim_win_get_config(0).relative ~= "" then
+        for _, win in ipairs(api.nvim_list_wins()) do
+            if api.nvim_win_get_config(win).relative == "" then
+                api.nvim_set_current_win(win)
+                break
+            end
         end
-        M.connection_file_path = connection_file
-        register_kernel_cleanup()
     end
-
-    local bufid = api.nvim_create_buf(false, true)
-
     if M.config.split_horizontal then
         local height = math.floor(vim.o.lines * M.config.split_ratio)
         local split_cmd = "botright " .. height .. "split"
@@ -387,6 +374,34 @@ local function open_terminal(python_executable, kernelname)
 
     local statusline_format = string.format("Kernel: %s  |  Line : %%l ", kernelname)
     api.nvim_set_option_value("statusline", statusline_format, {scope = "local", win = winid})
+
+    return winid
+end
+
+local function open_terminal(python_executable, kernelname)
+    M.filetype = vim.bo.filetype
+    local origin_win = api.nvim_get_current_win()
+    M.source_bufid = api.nvim_get_current_buf()
+    if not kernelname then
+        vim.notify(
+            string.format("Pyrola: No kernel mapped for filetype '%s'.", M.filetype),
+            vim.log.levels.ERROR
+        )
+        return
+    end
+
+    if not M.connection_file_path then
+        local connection_file = init_kernel(kernelname)
+        if not connection_file then
+            return
+        end
+        M.connection_file_path = connection_file
+        register_kernel_cleanup()
+    end
+
+    local bufid = api.nvim_create_buf(false, true)
+
+    local winid = show_terminal_buffer(bufid, kernelname)
 
     local console_path = get_plugin_path()
 
@@ -532,7 +547,7 @@ local function raw_send_message(message)
         return
     end
 
-    if api.nvim_win_is_valid(M.term.winid) then
+    if M.term.winid ~= 0 and api.nvim_win_is_valid(M.term.winid) then
         pcall(api.nvim_win_set_cursor,
             M.term.winid,
             {api.nvim_buf_line_count(api.nvim_win_get_buf(M.term.winid)), 0}
@@ -945,11 +960,23 @@ function M.setup_environment()
     })
 end
 
-local _pyrola_subcommands = { "init", "setup" }
+local cell_actions = {
+    cell = "send_cell_to_repl", next = "next_cell", previous = "previous_cell",
+    ["cell-above"] = "insert_cell_above", ["cell-below"] = "insert_cell_below",
+    ["cell-delete"] = "delete_cell", ["cell-up"] = "move_cell_up", ["cell-down"] = "move_cell_down",
+}
+local _pyrola_subcommands = { "init", "setup", "toggle" }
+for command in pairs(cell_actions) do table.insert(_pyrola_subcommands, command) end
+table.sort(_pyrola_subcommands)
 
 function M.setup(opts)
     vim.env.PYTHONDONTWRITEBYTECODE = "1"
-    M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+    opts = vim.deepcopy(opts or {})
+    if opts.split_horizontal == nil and opts.split_horizen ~= nil then
+        opts.split_horizontal = opts.split_horizen
+    end
+    opts.split_horizen = nil
+    M.config = vim.tbl_deep_extend("force", M.config, opts)
     if not M._colorscheme_autocmd then
         api.nvim_create_autocmd("ColorScheme", {
             callback = function()
@@ -972,7 +999,9 @@ function M.setup(opts)
                 M.setup_environment()
                 return
             end
-            vim.notify("Pyrola: Unknown command. Try :Pyrola init or :Pyrola setup", vim.log.levels.WARN)
+            local method = cmd.args == "toggle" and "toggle_split" or cell_actions[cmd.args]
+            if method then M[method](); return end
+            vim.notify("Pyrola: Unknown command. Use :Pyrola <Tab> to list commands.", vim.log.levels.WARN)
         end, {
             nargs = 1,
             complete = function(arg_lead)
@@ -988,8 +1017,10 @@ end
 
 function M.init()
     if M.term.opened == 1 and M.term.chanid ~= 0 then
-        if api.nvim_win_is_valid(M.term.winid) then
+        if M.term.winid ~= 0 and api.nvim_win_is_valid(M.term.winid) then
             api.nvim_set_current_win(M.term.winid)
+        elseif api.nvim_buf_is_valid(M.term.bufid) then
+            M.term.winid = show_terminal_buffer(M.term.bufid, M.active_kernel_name)
         end
         return
     end
@@ -1021,6 +1052,44 @@ function M.init()
     M.active_kernel_name = kernelname
     open_terminal(python_executable, kernelname)
 end
+
+-- Hide only the window; the terminal job, scrollback and kernel stay alive.
+function M.toggle_split()
+    if M.term.opened ~= 1 or M.term.chanid == 0 then M.init(); return end
+    local origin = api.nvim_get_current_win()
+    if M.term.winid ~= 0 and api.nvim_win_is_valid(M.term.winid) then
+        local regular = vim.tbl_filter(function(w) return api.nvim_win_get_config(w).relative == "" end, api.nvim_list_wins())
+        if #regular == 1 then
+            api.nvim_set_current_win(M.term.winid)
+            vim.cmd("new")
+            if M.source_bufid and api.nvim_buf_is_valid(M.source_bufid) then
+                api.nvim_win_set_buf(0, M.source_bufid)
+            end
+        end
+        api.nvim_win_hide(M.term.winid)
+        M.term.winid = 0
+    elseif api.nvim_buf_is_valid(M.term.bufid) then
+        M.term.winid = show_terminal_buffer(M.term.bufid, M.active_kernel_name)
+        if api.nvim_win_is_valid(origin) then api.nvim_set_current_win(origin) end
+    end
+end
+
+function M.send_cell_to_repl()
+    if not repl_ready() or vim.bo.buftype ~= "" then return end
+    local code = require("pyrola.cells").code()
+    if not code:match("%S") then return end
+    M.filetype = vim.bo.filetype
+    send_message(code)
+end
+
+function M.next_cell() return require("pyrola.cells").next() end
+function M.previous_cell() return require("pyrola.cells").previous() end
+function M.insert_cell_above() return require("pyrola.cells").insert_above() end
+function M.insert_cell_below() return require("pyrola.cells").insert_below() end
+function M.delete_cell() return require("pyrola.cells").delete() end
+function M.move_cell_up() return require("pyrola.cells").move_up() end
+function M.move_cell_down() return require("pyrola.cells").move_down() end
+function M.select_cell() return require("pyrola.cells").select() end
 
 function M.status()
     if M.term.opened == 1 and M.term.chanid ~= 0 then

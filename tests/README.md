@@ -6,6 +6,12 @@ Run the existing Python and headless Neovim regression checks with:
 ./tests/run.sh
 ```
 
+This includes cell-edit boundary cases, actual cell execution, REPL hide/show
+and manual window reopening, startup with the Python provider disabled, and
+the minimal configuration's visual-selection mappings and registered kernels.
+`tests/quickstart.lua` also accepts `PYROLA_PROJECT_PYTHON` to verify a separate
+project environment; the server/active venv comes from `PYROLA_TEST_PYTHON`.
+
 Run the live application checks with:
 
 ```sh
@@ -26,7 +32,7 @@ registers its managed kernels in a temporary Jupyter data directory. It uses
 the supplied Python environment for dependencies.
 
 Coverage includes setup/init, repeated init, statements/functions, visual
-selection, whole buffers, submission order, direct and multiline REPL input,
+selection, whole buffers, notebook cells, toggling during execution, submission order, direct and multiline REPL input,
 history, stdout/stderr/Unicode, Python/R inspection, globals drill-down, error
 recovery, kernel stdin, prompt restoration, interrupts, busy status, real PNG
 plots, inline scrollback, image-history keys and public navigation methods,

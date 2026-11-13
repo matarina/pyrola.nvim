@@ -16,5 +16,7 @@ nvim --headless -u NONE -l tests/image_protocol.lua
 nvim --headless -u NONE -l tests/inline_protocol.lua
 nvim --headless -u NONE -l tests/rpc.lua
 nvim --headless -u NONE -l tests/integration.lua
+nvim --headless -u NONE -l tests/issues.lua
+PATH="$(dirname "$PYROLA_TEST_PYTHON"):$PATH" nvim --headless -u examples/minimal-init.lua -l tests/quickstart.lua
 nvim --headless -u NONE -l tests/keymaps.lua
 nvim --headless -u NONE -l tests/demo_config.lua

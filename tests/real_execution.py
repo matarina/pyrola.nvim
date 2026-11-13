@@ -240,6 +240,33 @@ cat(paste0('LIVE_', 'BUFFER '), answer, '\\n', sep='')
         assert 'UNSELECTED' not in s.terminal()
     s.check('visual selection excludes unselected code', visual)
 
+    def cells():
+        code="# %% Selected\ncell_answer = 6 * 7\nprint('LIVE_'+'CELL',cell_answer)\n# %% Excluded\nraise RuntimeError('unselected-cell')" if py else "# %% Selected\ncell_answer <- 6 * 7\ncat(paste0('LIVE_', 'CELL '),cell_answer,'\\n',sep='')\n# %% Excluded\nstop('unselected-cell')"
+        s.fixture(code)
+        s.n.command('Pyrola cell')
+        s.output('LIVE_CELL 42')
+        assert 'unselected-cell' not in s.terminal()
+        s.n.command('Pyrola next')
+        assert s.n.current.window.cursor[0]==4
+        s.n.command('Pyrola previous')
+        assert s.n.current.window.cursor[0]==1
+    s.check('notebook cell execution and navigation exclude other cells',cells)
+
+    def toggle():
+        channel=s.lua("return require('pyrola').term.chanid")
+        connection=s.lua("return require('pyrola').connection_file_path")
+        code="import time; time.sleep(0.5); print('LIVE_'+'HIDDEN_DONE', answer)" if py else "Sys.sleep(0.5); cat(paste0('LIVE_', 'HIDDEN_DONE '),answer,'\\n',sep='')"
+        s.fixture(code)
+        s.lua("require('pyrola').send_buffer_to_repl()")
+        s.n.command('Pyrola toggle')
+        assert s.lua("return require('pyrola').term.winid")==0
+        s.output('LIVE_HIDDEN_DONE 42')
+        s.n.command('Pyrola toggle')
+        assert s.lua("return require('pyrola').term.winid")>0
+        assert s.lua("return require('pyrola').term.chanid")==channel
+        assert s.lua("return require('pyrola').connection_file_path")==connection
+    s.check('toggle REPL while executing retains console and kernel',toggle)
+
     def queue():
         codes = ["import time; time.sleep(0.5); queued = [1]", "queued.append(2)", "queued.append(3); print('LIVE_'+'QUEUE', queued)"] if py else ["Sys.sleep(0.5); queued <- c(1)", "queued <- c(queued,2)", "queued <- c(queued,3); cat(paste0('LIVE_', 'QUEUE '), paste(queued,collapse=','), '\\n', sep='')"]
         # All three submissions occur in one editor callback while the first is busy.
@@ -355,6 +382,7 @@ cat(paste0('LIVE_', 'BUFFER '), answer, '\\n', sep='')
     s.check('manually typed long-running code reports busy and interrupts',manual_busy)
 
     def plots():
+        normal_float=s.lua("return vim.api.nvim_get_hl(0,{name='NormalFloat',link=false})")
         code = """import matplotlib.pyplot as plt
 x = np.linspace(0, 6.28, 120)
 for label, y, color in [('Sine', np.sin(x), '#00a0ff'), ('Cosine', np.cos(x), '#ff00a0')]:
@@ -383,6 +411,7 @@ cat(paste0('LIVE_', 'PLOTS_DONE\\n'))
         assert '\U0010eeee' in s.terminal(), 'Missing real inline bitmap placeholder rows'
         screenshot=s.screenshot('inline-plots')
         s.assert_plot_pixels(screenshot,[(0,160,255),(255,0,160)])
+        assert s.lua("return vim.api.nvim_get_hl(0,{name='NormalFloat',link=false})")==normal_float
     s.check('real Matplotlib / base R and ggplot2 PNGs render inline', plots)
 
     def scrolling():
@@ -427,6 +456,10 @@ cat(paste0('LIVE_', 'PLOTS_DONE\\n'))
             s.assert_plot_pixels(s.screenshot(f'history-previous-{iteration}'),[(0,160,255)],(150,270,1290,700))
             s.keys('l')
             s.assert_plot_pixels(s.screenshot(f'history-next-{iteration}'),[(255,0,160)],(150,270,1290,700))
+        viewer=s.n.current.window.handle
+        s.n.command('normal! j')
+        assert s.n.api.win_is_valid(viewer)
+        s.assert_plot_pixels(s.screenshot('history-cursor-move'),[(255,0,160)],(150,270,1290,700))
         s.keys('q')
         wait(lambda:not s.lua("return require('pyrola.image').manager_active"),'history q closes viewer')
         for method,index in [('show_last_image',2),('show_previous_image',1),('show_next_image',2)]:
