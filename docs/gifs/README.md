@@ -1,6 +1,6 @@
 # Recording the feature demos
 
-The four GIFs in this directory are recordings of real Neovim/Kitty sessions
+The five GIFs in this directory are recordings of real Neovim/Kitty sessions
 using a live Python/Jupyter kernel. FFmpeg captures the terminal pixels so Kitty
 bitmap plots appear in the GIFs as they do on screen. No output is mocked.
 
@@ -20,7 +20,7 @@ From the repository root, run:
 python3 examples/record-demos.py
 ```
 
-To refresh just one clip, add `--only plots-and-history` (or another GIF's name
+To refresh just one clip, add `--only inline-plot-scroll` (or another GIF's name
 without the `.gif` extension).
 
 The recorder uses `examples/recording-init.lua` and a separate Xvfb display.
@@ -28,7 +28,12 @@ It sends the documented mappings through Neovim's input API, waits for real
 kernel output, and verifies the results before saving each GIF. Each demo gets
 a fresh editor and kernel. The user's desktop and Neovim config are unchanged.
 
-The output is four looping 1280 × 800 GIFs at 10 frames per second. Temporary
+The inline scrolling demo verifies that new output advances the right panel's
+viewport while the image stays on the same buffer lines, then scrolls back to
+show the complete plot again. It uses no floating image windows. Its viewport
+checks are saved in `inline-scroll-verification.json` alongside the videos.
+
+The output is five looping 1280 × 800 GIFs at 10 frames per second. Temporary
 lossless videos, Python examples, logs, and `verification.json` are kept under
 the ignored `artifacts/readme-recordings/` directory. Review the resulting GIFs
 before committing them.

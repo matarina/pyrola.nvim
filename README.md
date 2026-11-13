@@ -37,7 +37,16 @@ the symbol under the editor cursor.
 
 ![Browsing global variables and inspecting a NumPy array and a Python dictionary](docs/gifs/inspect-variables.gif)
 
-### Plot inline and browse image history
+### Scroll inline plots with code in the right panel
+
+Send code from the left editor and watch the plot move upward with new commands
+and output in the right REPL panel. Scroll back to recover the same plot beside
+its original code. In the REPL's Normal mode, `<C-y>` and `<C-e>` scroll one line
+at a time.
+
+![An inline Matplotlib plot scrolling upward with new code and output in the right REPL panel, then returning when scrolling back](docs/gifs/inline-plot-scroll.gif)
+
+### Browse image history
 
 Matplotlib plots render inside Kitty's REPL pane and scroll with their output.
 Press `<leader>im` for a larger preview, use `h` / `l` to browse previous plots,

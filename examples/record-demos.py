@@ -92,6 +92,30 @@ time.sleep(30)
 print("Kernel recovered. Answer:", answer)
 print("Next calculation:", answer * 2)
 ''',
+    'inline-plot-scroll': '''# Left: Python source. Right: live REPL scrollback.
+# Send code; the plot scrolls with its output.
+
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+
+x = np.linspace(0, 2 * np.pi, 160)
+fig, ax = plt.subplots(figsize=(5.4, 2.5))
+ax.plot(x, np.sin(x), color="#0d9488", lw=2.5)
+ax.set(title="Inline plot follows REPL output")
+ax.set(xlabel="Time", ylabel="Signal")
+ax.grid(alpha=0.2)
+fig.tight_layout()
+plt.show()
+print("Plot ready: run the next block.")
+
+for step in range(1, 13):
+    score = np.cos(step / 4)
+    print(f"step {step:02d} | score = {score:+.3f}")
+    time.sleep(0.3)
+
+print("Done: the plot is still in scrollback.")
+''',
 }
 
 
@@ -252,6 +276,79 @@ def interrupt(d):
     time.sleep(2)
 
 
+def inline_scroll(d):
+    def snapshot(phase):
+        state = d.lua("""
+            local t = require('pyrola').term
+            local lines = vim.api.nvim_buf_get_lines(t.bufid, 0, -1, false)
+            local first, last, count = nil, nil, 0
+            for row, line in ipairs(lines) do
+                if line:find(vim.fn.nr2char(0x10EEEE), 1, true) then
+                    first = first or row
+                    last, count = row, count + 1
+                end
+            end
+            local view = vim.api.nvim_win_call(t.winid, vim.fn.winsaveview)
+            return {first=first, last=last, rows=count, topline=view.topline}
+        """)
+        state['phase'] = phase
+        assert not d.floats(), 'The scrolling demo must use inline images only'
+        return state
+
+    d.caption('Space v s  /  Draw a bitmap plot inside the right REPL panel')
+    lines = d.nvim.current.buffer[:]
+    first = next(i for i, line in enumerate(lines) if line == 'import time')
+    last = next(i for i, line in enumerate(lines) if line.startswith('print("Plot ready:'))
+    d.nvim.current.window.cursor = (first + 1, 0)
+    d.keys('V' + str(last - first) + 'j', pause=0.6)
+    d.keys(' vs')
+    d.output('Plot ready: run the next block.')
+    wait_for(lambda: d.lua("return #require('pyrola.image').history") == 1, 'inline plot')
+    states = [snapshot('plot-ready')]
+    assert states[0]['rows'] > 0, 'Missing inline image placeholder rows'
+    time.sleep(1.5)
+
+    d.caption('Enter  /  New code and output push the plot upward together')
+    d.at('for step in')
+    d.keys('<CR>')
+    for step in (4, 8, 12):
+        wait_for(lambda: f'step {step:02d} | score =' in '\n'.join(d.terminal()), f'output step {step}')
+        states.append(snapshot(f'step-{step}'))
+    wait_for(lambda: d.lua("return require('pyrola').status()") == 'ready', 'streaming output complete')
+    d.enter('print("Done:')
+    d.output('Done: the plot is still in scrollback.')
+    states.append(snapshot('output-complete'))
+    assert states[-1]['topline'] > states[0]['topline'], 'Output did not advance the REPL viewport'
+    assert all((s['first'], s['last'], s['rows']) == (states[0]['first'], states[0]['last'], states[0]['rows']) for s in states), 'The image lost its place in scrollback'
+    time.sleep(1)
+
+    d.caption('Ctrl-W l  /  Focus the right panel; Ctrl-\\ Ctrl-N enters Normal mode')
+    d.keys('<C-w>l')
+    d.keys('<C-\\><C-n>')
+    d.lua('vim.wo.statusline = vim.go.statusline')
+    bottom = snapshot('before-scroll')
+    d.caption('Ctrl-Y  /  Scroll back: the plot returns with its original code')
+    for _ in range(18):
+        d.keys('<C-y>', pause=0.12)
+    restored = snapshot('scroll-back')
+    states.append(restored)
+    assert restored['topline'] < bottom['topline'], 'Scrollback did not move'
+    height = d.lua("return vim.api.nvim_win_get_height(require('pyrola').term.winid)")
+    assert restored['topline'] <= restored['first'] and restored['last'] < restored['topline'] + height, 'The restored plot is not fully visible'
+    time.sleep(1.5)
+    d.caption('Ctrl-E  /  Scroll down: the plot and code move together again')
+    for _ in range(10):
+        d.keys('<C-e>', pause=0.12)
+    states.append(snapshot('scroll-down'))
+    assert states[-1]['topline'] > restored['topline'], 'Forward scrolling did not move'
+    time.sleep(1)
+    d.caption('Ctrl-Y  /  Inline plots stay in terminal scrollback')
+    for _ in range(10):
+        d.keys('<C-y>', pause=0.12)
+    time.sleep(2)
+    (WORK / 'inline-scroll-verification.json').write_text(json.dumps(states, indent=2) + '\n')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--only', choices=SOURCES, help='Re-record one demo')
@@ -289,6 +386,7 @@ def main():
                 ('inspect-variables', '02  Explore live Python objects', inspect_variables),
                 ('plots-and-history', '03  Inline plots and image history', plots),
                 ('interrupt-recover', '04  Interrupt and keep working', interrupt),
+                ('inline-plot-scroll', '05  Inline plots scroll with code in the right panel', inline_scroll),
             ):
                 if args.only and name != args.only:
                     continue
@@ -303,6 +401,10 @@ def main():
                 d = Demo(nvim)
                 assert d.lua("local ok = pcall(vim.treesitter.get_parser, 0, 'python'); return ok"), 'Install the Python Tree-sitter parser first'
                 d.source = nvim.current.window.handle
+                if name == 'inline-plot-scroll':
+                    # A compact inline cell rectangle leaves room for adjacent
+                    # REPL commands, making their shared scrolling easy to see.
+                    d.lua("local image = require('pyrola').config.image; image.max_height_ratio = 0.45; image.max_width_ratio = 0.95")
                 nvim.command('Pyrola init')
                 wait_for(lambda: d.lua("return require('pyrola').status()") == 'ready', 'kernel startup')
                 nvim.api.set_current_win(d.source)
